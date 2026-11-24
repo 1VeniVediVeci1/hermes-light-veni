@@ -6,6 +6,7 @@ export interface ConnectorCardTranslations {
   retry: string
   grant: string
   connected: string
+  updated: string
   checking: string
   notConnected: string
   skipped: string

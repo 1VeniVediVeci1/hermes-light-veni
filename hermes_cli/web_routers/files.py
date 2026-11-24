@@ -40,7 +40,7 @@ from hermes_cli.staged_uploads import (
 )
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_remote_media import remote_media_response
-from hermes_cli.web_upload_limit import CHAT_IMAGE_MAX_BYTES
+from hermes_cli.web_upload_limit import CHAT_IMAGE_MAX_BYTES, chat_image_max_bytes
 from hermes_cli.web_server_surface import route_on
 from hermes_cli.web_server_files import (
     SANDBOX_NOT_FOUND, _agent_fs_path, _agent_path_scope, _file_url_path, _fs_path, _hosted_fs_read_guard,
@@ -69,7 +69,6 @@ _MEDIA_CONTENT_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
     ".webp": "image/webp", ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon",
 }
-_MEDIA_MAX_BYTES = 25 * 1024 * 1024
 
 _STREAMABLE_MEDIA_EXTENSIONS = frozenset({
     ".avi", ".flac", ".m4a", ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".opus", ".wav", ".webm",
@@ -207,10 +206,7 @@ def _refuse_sensitive_write(target: Path, requested: str, root: Optional[Path] =
         raise HTTPException(status_code=403, detail="Writing sensitive files is not allowed")
 
 
-_FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
-_FS_TEXT_PREVIEW_MAX_BYTES = 512 * 1024
-# Spot-editor save ceiling: the editor only opens non-truncated text (<= the
-# preview cap), so this guards against a pasted megablob, not expected payloads.
+# Spot-editor save ceiling, independent of the read-only text preview.
 _FS_TEXT_WRITE_MAX_BYTES = 8 * 1024 * 1024
 
 _FS_PREVIEW_LANGUAGE_BY_EXT = {
@@ -522,7 +518,7 @@ def _media_serve_roots() -> list[Path]:
 
 
 def _read_base64_file(path: Path) -> str:
-    """Read and encode a bounded file from a worker thread; 409 while a SQLite connection to it is live."""
+    """Read and encode a file from a worker thread; 409 while a SQLite connection to it is live."""
     with _serve_offline(path):
         data = path.read_bytes()
     # Encode after release: only the open/read/close needs the registry lock.
@@ -533,7 +529,7 @@ def _read_base64_file(path: Path) -> str:
 async def get_media(path: str):
     """Return a gateway-local image as a base64 data URL for remote clients
     that can't read this machine's disk. Auth-gated; restricted to the image
-    allowlist, a size cap AND the resolved (symlink-safe) media roots."""
+    allowlist and the resolved (symlink-safe) media roots."""
     try:
         target = Path(path).expanduser().resolve()
     except (OSError, RuntimeError):
@@ -546,8 +542,6 @@ async def get_media(path: str):
         raise HTTPException(status_code=403, detail="Path outside media roots")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    if target.stat().st_size > _MEDIA_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File too large")
 
     encoded = await asyncio.to_thread(_read_base64_file, target)
     return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
@@ -557,12 +551,11 @@ async def get_media(path: str):
 # reach the CDN itself (#74564: a Desktop on a restricted network renders an
 # agent-generated FAL image inline; the direct link is blocked, but the GATEWAY
 # hosts a working route to the CDN and already holds the generation credentials).
-# Host-allowlisted + size-capped like the rest of the media surface.
+
 _MEDIA_PROXY_ALLOWED_HOSTS = (
     "fal.media", "fal.run", "v3.fal.media", "storage.googleapis.com",
     "*.fal.media", "*.fal.run",
 )
-_MEDIA_PROXY_TIMEOUT_S = 20.0
 _MEDIA_PROXY_MAX_REDIRECTS = 3
 _MEDIA_PROXY_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
@@ -582,7 +575,7 @@ async def _media_proxy_get(url: str):
     as-is and fails the caller's 200 check."""
     import httpx
 
-    async with httpx.AsyncClient(timeout=_MEDIA_PROXY_TIMEOUT_S, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=None, follow_redirects=False) as client:
         response = await client.get(url)
         for _ in range(_MEDIA_PROXY_MAX_REDIRECTS):
             location = response.headers.get("location")
@@ -600,7 +593,7 @@ async def _media_proxy_get(url: str):
 async def proxy_remote_media(url: str, request: Request):
     """Fetch a remote image URL the gateway can reach but the client cannot
     (#74564), returning the same ``data_url`` shape as ``/api/media``. Only
-    allowlisted image CDNs; the bytes stay behind the size cap."""
+    allowlisted image CDNs."""
     _require_token(request)
     try:
         parsed = urllib.parse.urlparse((url or "").strip())
@@ -630,15 +623,12 @@ async def proxy_remote_media(url: str, request: Request):
     if content_type not in _MEDIA_CONTENT_TYPES.values():
         raise HTTPException(status_code=415, detail="Unsupported media type")
     data = response.content
-    if len(data) > _MEDIA_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File too large")
 
     encoded = base64.b64encode(data).decode("ascii")
     return {"data_url": f"data:{content_type};base64,{encoded}"}
 
 
 def _decode_data_url(data_url: str) -> tuple[bytes, str]:
-    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES
     text = (data_url or "").strip()
     if not text.startswith("data:") or "," not in text:
         raise HTTPException(status_code=400, detail="Upload payload must be a data URL")
@@ -650,8 +640,6 @@ def _decode_data_url(data_url: str) -> tuple[bytes, str]:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
         raise HTTPException(status_code=400, detail="Upload payload is not valid base64")
-    if len(data) > _MANAGED_FILE_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File is too large")
     return data, mime_type
 
 
@@ -683,8 +671,9 @@ def _decode_chat_image_upload(payload: ChatImageUpload) -> tuple[bytes, str, str
     data, mime_type = _decode_data_url(payload.data_url)
     if not mime_type.lower().startswith("image/"):
         raise HTTPException(status_code=400, detail="Upload payload must be an image")
-    if len(data) > _CHAT_IMAGE_UPLOAD_MAX_BYTES:
-        mb = _CHAT_IMAGE_UPLOAD_MAX_BYTES // (1024 * 1024)
+    cap = chat_image_max_bytes()
+    if cap is not None and len(data) > cap:
+        mb = cap // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"Image is too large; cap is {mb} MB")
     ext = _chat_image_extension(data)
     if ext not in _CHAT_IMAGE_ALLOWED_EXTENSIONS:
@@ -788,20 +777,20 @@ def _managed_readable_file(
     return policy, target, display_path, _MANAGED_FILE_MAX_BYTES, mime_type
 
 
-def _managed_file_size(target: Path, max_bytes: int) -> int:
+def _managed_file_size(target: Path, max_bytes: int | None = None) -> int:
     try:
         size = target.stat().st_size
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
-    if size > max_bytes:
+    if max_bytes is not None and size > max_bytes:
         raise HTTPException(status_code=413, detail="File is too large")
     return size
 
 
 @router.get("/api/files/read")
 def read_managed_file(request: Request, path: str):
-    policy, target, display_path, max_bytes, mime_type = _managed_readable_file(request, path)
-    size = _managed_file_size(target, max_bytes)
+    policy, target, display_path, _max_bytes, mime_type = _managed_readable_file(request, path)
+    size = _managed_file_size(target)
     with _io_errors("File is not readable", "Could not read file"):
         encoded = _read_base64_file(target)
     # Rendered here, on the worker: returned as a dict, the multi-MB data URL would be serialized on the event loop.
@@ -1009,7 +998,11 @@ def _managed_write_result(policy, target: Path, display_path: str) -> dict:
 @router.post("/api/files/upload")
 def upload_managed_file(payload: ManagedFileUpload, request: Request):
     policy, target, display_path = _managed_write_target(payload.path, request, payload.overwrite)
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES
+
     data, _mime_type = _decode_data_url(payload.data_url)
+    if len(data) > _MANAGED_FILE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File is too large")
     with _io_errors("File is not writable", "Could not write file"):
         target.parent.mkdir(parents=True, exist_ok=True)
         owner = target.stat() if os.name == "posix" and target.exists() else None
@@ -1181,8 +1174,6 @@ async def fs_read_text(
                 _remote_read_bytes,
                 backend,
                 path,
-                max_bytes=_FS_TEXT_SOURCE_MAX_BYTES,
-                read_limit=_FS_TEXT_PREVIEW_MAX_BYTES,
             )
         except Exception as exc:
             _raise_fs_backend_error(exc)
@@ -1194,7 +1185,7 @@ async def fs_read_text(
             "mimeType": _fs_mime_type(type_path),
             "path": target,
             "text": data.decode("utf-8", errors="replace"),
-            "truncated": size > _FS_TEXT_PREVIEW_MAX_BYTES,
+            "truncated": False,
         }
     profile_home = _fs_profile_home(profile)
     # A session's /workspace is its own sandbox, resolved as download resolves it.
@@ -1204,11 +1195,7 @@ async def fs_read_text(
         await asyncio.to_thread(_hosted_fs_read_guard, target, request)
     # Off the loop: the credential-store check resolves every guard home's stores.
     target, st = await asyncio.to_thread(_fs_regular_file, target, profile_home)
-    if st.st_size > _FS_TEXT_SOURCE_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File too large")
-    data = await asyncio.to_thread(
-        _fs_read_bytes, target, min(st.st_size, _FS_TEXT_PREVIEW_MAX_BYTES),
-    )
+    data = await asyncio.to_thread(_fs_read_bytes, target)
     type_path = _fs_preview_type_path(path, target)
     return {
         "binary": _fs_looks_binary(data[:4096]),
@@ -1217,7 +1204,7 @@ async def fs_read_text(
         "mimeType": _fs_mime_type(type_path),
         "path": str(target),
         "text": data.decode("utf-8", errors="replace"),
-        "truncated": st.st_size > _FS_TEXT_PREVIEW_MAX_BYTES,
+        "truncated": False,
     }
 
 
@@ -1363,14 +1350,11 @@ def _fs_profile_home(profile: Optional[str]) -> Optional[Path]:
 async def fs_read_data_url(
     path: str, request: Request, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
-    from hermes_cli.web_server import _FS_DATA_URL_MAX_BYTES
     session = await _fs_owned_session(session_id, profile)
     backend = await asyncio.to_thread(_remote_fs_backend, path, profile)
     if backend is not None:
         try:
-            data, _size, target = await asyncio.to_thread(
-                _remote_read_bytes, backend, path, max_bytes=_FS_DATA_URL_MAX_BYTES
-            )
+            data, _size, target = await asyncio.to_thread(_remote_read_bytes, backend, path)
         except Exception as exc:
             _raise_fs_backend_error(exc)
         encoded = base64.b64encode(data).decode("ascii")
@@ -1381,8 +1365,6 @@ async def fs_read_data_url(
     if not await asyncio.to_thread(_is_host_file, str(target), profile):
         await asyncio.to_thread(_hosted_fs_read_guard, target, request)
     target, st = await asyncio.to_thread(_fs_regular_file, target, _fs_profile_home(profile))
-    if st.st_size > _FS_DATA_URL_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File too large")
     # A transcript image is read again on every remount. The browser keeps the body in its own
     # HTTP cache and revalidates each time, so an unchanged file costs a 304 instead of its bytes
     # over a slow link, and a rewritten one is fetched fresh.
@@ -1395,7 +1377,7 @@ async def fs_read_data_url(
         mime_type = _fs_mime_type(_fs_preview_type_path(path, target))
         return JSONResponse({"dataUrl": f"data:{mime_type};base64,{encoded}"}, headers=validators)
 
-    # Read, encode and render off the event loop: up to 16 MB inline stalls every other request (and /api/ws).
+    # Read, encode and render off the event loop to avoid stalling other requests and /api/ws.
     return await asyncio.to_thread(_render)
 
 
@@ -1426,11 +1408,11 @@ def _remote_download_target(backend, path: str) -> tuple[str, int]:
     return target, size
 
 
-def _remote_read_bytes(backend, path: str, **limits) -> tuple[bytes, int, str]:
+def _remote_read_bytes(backend, path: str) -> tuple[bytes, int, str]:
     """*path* read from the SSH workspace once download's checks pass on the path it resolves to:
     a link named ``notes.txt`` that points at ``~/.hermes/.env`` is refused before any byte moves."""
     target, _size = _remote_download_target(backend, path)
-    return backend.read_bytes(target, **limits)
+    return backend.read_bytes(target, max_bytes=None)
 
 
 def _remote_stream_target(backend, path: str) -> tuple[str, int]:

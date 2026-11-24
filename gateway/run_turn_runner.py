@@ -1119,26 +1119,54 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
             from agent.notification_presentation import notification_turn
-            from gateway.session_results import execution_result
-            captured = execution_result.get()
-            before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
-                      getattr(agent, 'session_completion_tokens', 0) or 0)
-            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
-                from gateway.response_filters import silence_allowed
-                # Where a bare marker would become the "needed a reply" warning, the agent ends a
-                # marker that follows a written reply on that reply, before transform/persistence.
-                agent._silence_marker_needs_reply = not silence_allowed(
-                    ctx.persist_user_display_kind, ctx.reply_expected)
-                try:
-                    result = agent.run_conversation(api_message, **kwargs)
-                finally:
-                    agent._silence_marker_needs_reply = False
-            if captured is not None:
-                incoming = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
-                outgoing = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
-                captured['usage'] = {'input_tokens': incoming, 'output_tokens': outgoing,
-                                     'total_tokens': incoming + outgoing}
-                _settle_api_runtime_lock(agent, result, captured)
+            from gateway.process_completions import claim_idle_process_batch
+            from agent.process_completions import format_internal_process_results
+            batch = ctx.process_completion_batch
+            completion_token, claimed = None, []
+            if batch is not None:
+                # Last ownership check on the worker, after setup/queue/lease awaits,
+                # immediately before starting the model turn.
+                completion_token, claimed = claim_idle_process_batch(
+                    batch, session_key=session_key, parent_session_id=str(agent.session_id or ""),
+                    session_db=getattr(agent, "_session_db", None))
+                if not claimed:
+                    return {"final_response": "[SILENT]", "messages": agent_history,
+                            "completed": True, "api_calls": 0}
+                api_message = format_internal_process_results(claimed)
+                kwargs["persist_user_message"] = api_message
+                kwargs["persist_user_display_kind"] = "internal_notification"
+            try:
+                from gateway.session_results import execution_result
+                captured = execution_result.get()
+                before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
+                          getattr(agent, 'session_completion_tokens', 0) or 0)
+                with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
+                    from gateway.response_filters import silence_allowed
+                    # Where a bare marker would become the "needed a reply" warning, the agent ends a
+                    # marker that follows a written reply on that reply, before transform/persistence.
+                    agent._silence_marker_needs_reply = not silence_allowed(
+                        ctx.persist_user_display_kind, ctx.reply_expected)
+                    try:
+                        result = agent.run_conversation(api_message, **kwargs)
+                    finally:
+                        agent._silence_marker_needs_reply = False
+                if captured is not None:
+                    incoming = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
+                    outgoing = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
+                    captured['usage'] = {'input_tokens': incoming, 'output_tokens': outgoing,
+                                         'total_tokens': incoming + outgoing}
+                    _settle_api_runtime_lock(agent, result, captured)
+            except BaseException:
+                if claimed:
+                    from tools.process_registry import process_registry
+                    process_registry.release_completion_events(claimed, claim_id=completion_token)
+                raise
+            if claimed and isinstance(result, dict) and result.get("failed") and not result.get("api_calls"):
+                from tools.process_registry import process_registry
+                process_registry.release_completion_events(claimed, claim_id=completion_token)
+            elif claimed:
+                from tools.process_registry import process_registry
+                process_registry.commit_completion_events(claimed, claim_id=completion_token)
             return result
         finally:
             unregister_gateway_notify(session_key)

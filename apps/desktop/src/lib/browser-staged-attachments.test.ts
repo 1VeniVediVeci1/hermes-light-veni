@@ -143,7 +143,7 @@ describe('browser staged attachment transport', () => {
 
       expect(requestGateway).toHaveBeenCalledWith('file.attach', {
         name: attachment.label, session_id: 'owner-runtime', staged_upload: source
-      })
+      }, 0)
       expect(result.refText).toBe(refText)
       expect(result.stagedUpload).toEqual(source)
       expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -195,7 +195,7 @@ describe('browser staged attachment transport', () => {
     })
     expect(requestGateway).toHaveBeenCalledWith('file.attach', {
       name: sourceName, path, session_id: 'runtime', data_url: 'data:text/plain;base64,cGF5bG9hZA=='
-    })
+    }, 0)
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
@@ -242,7 +242,7 @@ describe('browser staged attachment transport', () => {
     expect(recovered).toHaveBeenCalledWith('new-runtime')
     expect(requestGateway).toHaveBeenLastCalledWith('file.attach', {
       name: sourceName, session_id: 'new-runtime', staged_upload: source
-    })
+    }, 0)
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
@@ -348,9 +348,8 @@ describe('browser staged attachment transport', () => {
 
   it.each([
     { remote: false, terminalBackend: 'local', upload: false },
-    { remote: true, terminalBackend: 'local', upload: true },
     { remote: false, terminalBackend: 'docker', upload: true }
-  ])('preserves native attachment transport: %j', async ({ remote, terminalBackend, upload }) => {
+  ])('preserves local native attachment transport: %j', async ({ remote, terminalBackend, upload }) => {
     const readFileDataUrl = vi.fn(async () => 'data:text/plain;base64,cGF5bG9hZA==')
     Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { readFileDataUrl } })
     const requestGateway = vi.fn(async () => attached() as never)
@@ -362,6 +361,26 @@ describe('browser staged attachment transport', () => {
     expect(requestGateway).toHaveBeenCalledWith('file.attach', {
       name: 'notes.txt', path, session_id: 'runtime',
       ...(upload ? { data_url: 'data:text/plain;base64,cGF5bG9hZA==' } : {})
+    }, 0)
+  })
+
+  it('stages a remote native file over HTTP and attaches only its staged receipt', async () => {
+    const api = vi.fn(async () => ({ path: source.path, staged_upload: source }))
+    const readFileDataUrl = vi.fn()
+    vi.stubGlobal('hermesDesktop', { api, readFileDataUrl })
+    const requestGateway = vi.fn(async () => attached() as never)
+    const path = '/native/notes.txt'
+
+    await uploadComposerAttachment(rawAttachment(path), {
+      remote: true, requestGateway, sessionId: 'runtime'
     })
+
+    expect(api).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST', path: '/api/chat/file-upload', upload: { path, filename: 'notes.txt' }
+    }))
+    expect(readFileDataUrl).not.toHaveBeenCalled()
+    expect(requestGateway).toHaveBeenCalledExactlyOnceWith('file.attach', {
+      name: 'notes.txt', session_id: 'runtime', staged_upload: source
+    }, 0)
   })
 })

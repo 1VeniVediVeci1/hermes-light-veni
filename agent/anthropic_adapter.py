@@ -432,6 +432,19 @@ def _build_anthropic_client_with_bearer_hook(
     return _new_sdk_client(sdk, kwargs, headers, route=base_url)
 
 
+def _messages_proxy_policy(base_url: str) -> dict:
+    """Select only an unambiguous Messages entry at this exact URL (not a Responses sibling)."""
+    from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
+    target = str(base_url).strip().rstrip("/")
+    matches = [p for p in get_compatible_custom_providers(load_config_readonly())
+               if p.get("api_mode") == "anthropic_messages" and
+               str(p.get("base_url") or "").strip().rstrip("/") == target]
+    if len(matches) != 1 or not isinstance(matches[0].get("proxy_url"), str):
+        return {}
+    return {"proxy_url": matches[0]["proxy_url"],
+            "proxy_fallback_to_direct": matches[0].get("proxy_fallback_to_direct") is True}
+
+
 def _new_sdk_client(sdk, kwargs: dict[str, Any], headers: dict[str, str], route: str | None = None):
     """``sdk.Anthropic(**kwargs)`` with ``headers`` attached, sending exactly ONE credential.
     ``route`` is the caller's un-normalized base_url (the ``/v1`` form ``custom_providers`` entries are
@@ -502,6 +515,18 @@ def build_anthropic_client(api_key, base_url: str | None = None, timeout: float 
         )
     normalize_proxy_env_vars()
     normalized_base_url, kwargs = _base_client_kwargs(base_url, timeout)
+    # A relay can share its URL with an OpenAI/Responses entry. Select only an
+    # unambiguous Messages policy; leave all SDK defaults alone when not opted in.
+    if base_url:
+        controls = _messages_proxy_policy(base_url)
+        if "proxy_url" in controls:
+            import httpx
+            from agent.process_bootstrap import build_keepalive_http_client
+            kwargs["http_client"] = build_keepalive_http_client(
+                base_url, proxy_url=controls["proxy_url"],
+                proxy_fallback_to_direct=controls.get("proxy_fallback_to_direct", False),
+                verify=httpx.create_ssl_context(verify=True, trust_env=True),
+            )
     if "default_query" in kwargs:  # historical: this path also strips a stray trailing slash on Azure
         kwargs["base_url"] = normalized_base_url.rstrip("/")
     common_betas = _common_betas_for_base_url(normalized_base_url, drop_context_1m_beta=drop_context_1m_beta)

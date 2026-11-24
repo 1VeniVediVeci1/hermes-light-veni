@@ -66,6 +66,13 @@ def model_preserves_prior_thinking(model: Any) -> bool:
 # signature 400 there is healed by anthropic_thinking_replay's durable suppression.
 SIGNED_REPLAY_ROUTES = frozenset({"native", "minimax"})
 
+# Opt the operator-selected Claude relays into the native replay contract at these exact
+# endpoints only; third-party authentication remains unchanged.
+_NATIVE_THINKING_RELAYS = frozenset({
+    "https://43.163.210.130", "https://43.163.210.130/v1",
+    "https://chuanapi.com", "https://chuanapi.com/v1",
+})
+
 
 def _is_off_anthropic(base_url: Any) -> bool:
     return _is_third_party_anthropic_endpoint(base_url) and not _is_nous_portal_endpoint(base_url)
@@ -77,7 +84,8 @@ _ROUTE_RULES = (
     ("kimi", lambda url, model: _is_kimi_family_endpoint(url, model)),
     ("deepseek", lambda url, model: _is_deepseek_anthropic_endpoint(url)
         or (_is_off_anthropic(url) and _model_name_is_deepseek_thinking(model))),
-    ("native", lambda url, model: not _is_off_anthropic(url) or _is_claude_platform_endpoint(url)),
+    ("native", lambda url, model: not _is_off_anthropic(url) or _is_claude_platform_endpoint(url)
+        or str(url or "").strip().rstrip("/") in _NATIVE_THINKING_RELAYS),
     ("minimax", lambda url, model: _is_minimax_anthropic_endpoint(url)),
 )
 
@@ -85,7 +93,7 @@ _ROUTE_RULES = (
 def anthropic_thinking_route(base_url: Any, model: Any) -> str:
     """Which thinking-replay contract an Anthropic Messages request follows: ``kimi`` (replay as-is),
     ``deepseek`` (unsigned only), ``native`` (Anthropic-signed blocks: the direct API, Nous Portal,
-    Bedrock, Vertex AI, Azure AI Foundry), ``minimax`` (its own signed blocks, returned unchanged on
+    Bedrock, Vertex AI, Azure AI Foundry and the operator-selected relays), ``minimax`` (its own signed blocks, returned unchanged on
     every turn as its docs require) or ``third_party`` (an unknown relay that cannot verify Anthropic
     signatures: strip all). The converter, accounting and signature-rejection state share this."""
     return next((route for route, matches in _ROUTE_RULES if matches(base_url, model)), "third_party")

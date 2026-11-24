@@ -48,6 +48,10 @@ const outcomeWord = (target: ConnectionOperationTarget): string => {
     return 'connected'
   }
 
+  if (target.state === 'updated') {
+    return t('connection.status.updated')
+  }
+
   return target.state === 'skipped' ? 'skipped' : 'not connected'
 }
 

@@ -748,6 +748,11 @@ class ChatCompletionsTransport(ProviderTransport):
                 content = refusal
                 if finish_reason in (None, "stop"):
                     finish_reason = "content_filter"
+        # Anthropic ``refusal`` category/explanation relayed through a chat-shaped response
+        # (MoA aggregator on a Messages route); the refusal handler reads it from provider_data.
+        stop_details = getattr(msg, "stop_details", None)
+        if stop_details is not None:
+            provider_data["stop_details"] = stop_details
 
         return NormalizedResponse(
             content=content, tool_calls=tool_calls, finish_reason=finish_reason,

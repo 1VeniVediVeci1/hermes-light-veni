@@ -4496,6 +4496,10 @@ export const zhOverrides = {
       credentialsHeading: '凭据'
     },
     mcpSetup: {
+      updateTitle: '更新 MCP 服务器',
+      updateAction: '更新',
+      updateSetup: server => `更新 ${server}`,
+      updated: server => `已更新 ${server}`,
       installTitle: '添加 MCP 服务器',
       enableTitle: '启用 MCP 服务器',
       authorizeTitle: '授权 MCP 服务器',

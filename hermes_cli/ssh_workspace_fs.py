@@ -85,13 +85,17 @@ class SshWorkspaceFs:
             path = posixpath.normpath(stripped)
         return path
 
-    def _execute(self, command: str, *, stdin_data: str | None = None, timeout: int | None = None) -> dict:
+    def _execute(self, command: str, *, stdin_data: str | None = None, unbounded: bool = False) -> dict:
         with self._lock:
+            if unbounded:
+                # SSH workspace previews and streams must not inherit terminal.timeout.
+                result = self._env._run_ssh(f"bash -c {shlex.quote(command)}", timeout=None)
+                return {"returncode": result.returncode, "output": result.stdout or result.stderr}
             return self._env.execute(
                 command,
                 cwd=self._env.cwd,
                 stdin_data=stdin_data,
-                timeout=timeout or self._env.timeout,
+                timeout=self._env.timeout,
             )
 
     @staticmethod
@@ -144,7 +148,7 @@ done
         self,
         path: str,
         *,
-        max_bytes: int,
+        max_bytes: int | None = None,
         read_limit: int | None = None,
     ) -> tuple[bytes, int, str]:
         target = self.normalize(path)
@@ -154,16 +158,19 @@ done
             if read_limit is not None
             else 'base64 < "$p"'
         )
+        size_guard = "" if max_bytes is None else (
+            f"if [ \"$size\" -gt {int(max_bytes)} ]; then printf '__HERMES_FS_ERROR__:EFBIG\\n'; exit 47; fi"
+        )
         command = f"""
 p={quoted}
 if [ ! -e "$p" ] && [ ! -L "$p" ]; then printf '__HERMES_FS_ERROR__:ENOENT\\n'; exit 44; fi
 if [ ! -f "$p" ]; then printf '__HERMES_FS_ERROR__:ENOTREG\\n'; exit 45; fi
 size=$(stat -c %s "$p" 2>/dev/null || stat -f %z "$p" 2>/dev/null) || {{ printf '__HERMES_FS_ERROR__:EACCES\\n'; exit 46; }}
-if [ "$size" -gt {int(max_bytes)} ]; then printf '__HERMES_FS_ERROR__:EFBIG\\n'; exit 47; fi
+{size_guard}
 printf '__HERMES_FS_SIZE__:%s\\n' "$size"
 {{ {read_command}; }} || {{ printf '__HERMES_FS_ERROR__:EACCES\\n'; exit 46; }}
 """
-        result = self._execute(command)
+        result = self._execute(command, unbounded=max_bytes is None and read_limit is None)
         output = result.get("output", "")
         if result.get("returncode") != 0:
             raise SshWorkspaceFsError(self._error_code(output))
@@ -192,7 +199,7 @@ size=$(stat -c %s "$target" 2>/dev/null || stat -f %z "$target" 2>/dev/null) || 
 printf '__HERMES_FS_TARGET__:%s\\n' "$(printf '%s' "$target" | base64 | tr -d '\\r\\n')"
 printf '__HERMES_FS_SIZE__:%s\\n' "$size"
 """
-        result = self._execute(command)
+        result = self._execute(command, unbounded=True)
         output = result.get("output", "")
         if result.get("returncode") != 0:
             raise SshWorkspaceFsError(self._error_code(output))

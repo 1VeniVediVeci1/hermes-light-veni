@@ -774,6 +774,10 @@ _SESSION_LIST_HEAVY_FIELDS = ("system_prompt", "model_config")
 
 def _strip_session_list_rows(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for s in sessions:
+        # Legacy stores can contain a literal strftime placeholder, not a timestamp.
+        # Project unknown as null without changing storage or its derived activity flag.
+        if s.get("ended_at") == "%s":
+            s["ended_at"] = None
         for key in _SESSION_LIST_HEAVY_FIELDS:
             s.pop(key, None)
     return sessions

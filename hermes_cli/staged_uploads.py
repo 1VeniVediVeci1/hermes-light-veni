@@ -210,7 +210,10 @@ def resolve_staged_upload(home: Path, raw_path: str) -> Path:
         or not source.is_file()
     ):
         raise ValueError("staged upload is outside its source profile")
-    if source.stat().st_size > WEBAPP_ATTACHMENT_MAX_BYTES:
+    from hermes_cli.attachment_limits import attachment_size_cap
+
+    cap = attachment_size_cap(WEBAPP_ATTACHMENT_MAX_BYTES)
+    if cap is not None and source.stat().st_size > cap:
         raise ValueError("staged upload exceeds the browser attachment size limit")
     return source
 

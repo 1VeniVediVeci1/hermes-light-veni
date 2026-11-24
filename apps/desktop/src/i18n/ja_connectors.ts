@@ -2,6 +2,7 @@ import type { TranslationOverrides } from './define-locale'
 
 export const jaConnectors = {
   connectors: {
+    updated: '更新しました',
     directory: {
       suggested: 'おすすめ',
       allApps: 'すべてのアプリ',

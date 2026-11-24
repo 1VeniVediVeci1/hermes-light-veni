@@ -1,7 +1,6 @@
 import type { Terminal } from '@xterm/xterm'
 
 import { translateNow } from '@/i18n'
-import { BROWSER_UPLOAD_MAX_BYTES } from '@/lib/browser-uploads'
 import { triggerHaptic } from '@/lib/haptics'
 import { notify, notifyError } from '@/store/notifications'
 
@@ -100,21 +99,14 @@ function collectDroppedEntries(t: DataTransfer): DroppedEntry[] {
 }
 
 // The browser uploads each dropped file to the host (the composer's staged upload) and types the
-// host path it gets back. A file over the upload limit is never sent; a warning names it.
+// host path it gets back. The server owns the size limit (local change: no client cap).
 async function stageDroppedEntries(entries: DroppedEntry[]): Promise<string[]> {
   const stage = window.hermesDesktop?.stageFileForAttach
-  const tooLarge: string[] = []
 
   const paths = await Promise.all(
     entries.map(async entry => {
       if (typeof entry === 'string') {
         return entry
-      }
-
-      if (entry.size > BROWSER_UPLOAD_MAX_BYTES) {
-        tooLarge.push(entry.name)
-
-        return ''
       }
 
       try {
@@ -126,18 +118,6 @@ async function stageDroppedEntries(entries: DroppedEntry[]): Promise<string[]> {
       }
     })
   )
-
-  if (tooLarge.length) {
-    notify({
-      kind: 'warning',
-      title: translateNow('rightSidebar.terminalDropTooLargeTitle'),
-      message: translateNow(
-        'rightSidebar.terminalDropTooLarge',
-        tooLarge.join(', '),
-        `${BROWSER_UPLOAD_MAX_BYTES / (1024 * 1024)} MiB`
-      )
-    })
-  }
 
   return paths.filter(Boolean)
 }

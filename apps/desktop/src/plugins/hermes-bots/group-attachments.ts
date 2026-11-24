@@ -6,8 +6,6 @@
  * Mode.
  */
 
-import { host } from '@hermes/plugin-sdk'
-
 import { botsText } from './i18n'
 import type { Attachment, AttachmentKind } from './types'
 
@@ -26,8 +24,8 @@ function groupAttachmentKind(file: File): AttachmentKind {
   return 'file'
 }
 
-/** File objects → [{ name, data, kind }] (data URLs), oversized files skipped
- *  with a toast. Images are downscaled; PDFs and other files ride as raw data
+/** File objects → [{ name, data, kind }] (data URLs). Images are downscaled;
+ *  PDFs and other files ride as raw data
  *  URLs for the gateway's file.attach staging. Shared by the picker button,
  *  the composer paste handler, and room drag & drop. */
 export async function filesToGroupAttachments(files: File[] | FileList | null | undefined): Promise<Attachment[]> {
@@ -36,15 +34,6 @@ export async function filesToGroupAttachments(files: File[] | FileList | null | 
 
   for (const file of [...(files || [])]) {
     if (!file) {
-      continue
-    }
-
-    if (file.size > 15_000_000) {
-      host.notify({
-        kind: 'error',
-        message: labels.attachmentTooLarge(file.name || labels.attachmentFallback)
-      })
-
       continue
     }
 

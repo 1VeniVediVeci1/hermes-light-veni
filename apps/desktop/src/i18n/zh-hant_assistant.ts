@@ -4,6 +4,10 @@ import { zhHantThemePicker } from './zh-hant_theme_picker'
 export const zhHantAssistant = {
   assistant: {
     mcpSetup: {
+      updateTitle: '更新 MCP 伺服器',
+      updateAction: '更新',
+      updateSetup: server => `更新 ${server}`,
+      updated: server => `已更新 ${server}`,
       launchCommand: target => `將執行：${target}`,
       launchRemote: target => `將連線：${target}`,
       launchEnv: keys => `環境變數：${keys}`,

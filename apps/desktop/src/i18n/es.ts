@@ -5190,6 +5190,10 @@ export const esOverrides = {
       credentialsHeading: 'Credenciales'
     },
     mcpSetup: {
+      updateTitle: 'Actualizar servidores MCP',
+      updateAction: 'Actualizar',
+      updateSetup: server => `Actualizar ${server}`,
+      updated: server => `${server} actualizado`,
       installTitle: 'Añadir servidores MCP',
       enableTitle: 'Activar servidores MCP',
       authorizeTitle: 'Autorizar servidores MCP',

@@ -47,19 +47,22 @@ const SHELL_CLASS = `${WIDGET_SHELL_CLASS} text-[length:var(--conversation-text-
 const TITLE = {
   authorize: (copy: SetupCopy) => copy.authorizeTitle,
   enable: (copy: SetupCopy) => copy.enableTitle,
-  install: (copy: SetupCopy) => copy.installTitle
+  install: (copy: SetupCopy) => copy.installTitle,
+  update: (copy: SetupCopy) => copy.updateTitle
 } satisfies Record<SetupAction, (copy: SetupCopy) => string>
 
 const VERB = {
   authorize: (copy: SetupCopy) => copy.authorizeAction,
   enable: (copy: SetupCopy) => copy.enableAction,
-  install: (copy: SetupCopy) => copy.installAction
+  install: (copy: SetupCopy) => copy.installAction,
+  update: (copy: SetupCopy) => copy.updateAction
 } satisfies Record<SetupAction, (copy: SetupCopy) => string>
 
 const DONE = {
   authorize: (copy: SetupCopy, server: string) => copy.authorized(server),
   enable: (copy: SetupCopy, server: string) => copy.enabled(server),
-  install: (copy: SetupCopy, server: string) => copy.installed(server)
+  install: (copy: SetupCopy, server: string) => copy.installed(server),
+  update: (copy: SetupCopy, server: string) => copy.updated(server)
 } satisfies Record<SetupAction, (copy: SetupCopy, server: string) => string>
 
 const LAUNCH_LINE = {
@@ -78,7 +81,8 @@ const MCP_VERBS = {
   initiated: 'open',
   not_connected: 'none',
   pending: 'approve',
-  skipped: 'none'
+  skipped: 'none',
+  updated: 'none'
 } satisfies Record<ConnectionTargetState, McpVerb>
 
 // Two states read differently per action. A pending authorize is the backend still minting the link,
@@ -120,21 +124,24 @@ function McpSetupSummary({ action, rows }: { action: SetupAction; rows: SettledT
       {rows.map(row => {
         const title = prettyName(row.name)
         const connected = row.state === 'connected'
+        const updated = row.state === 'updated'
 
-        const line = connected
-          ? row.toolsUnavailable
-            ? `${DONE[action](copy, title)} · ${t.connectors.authorizedToolsUnavailable}`
-            : DONE[action](copy, title)
-          : row.state === 'skipped'
-            ? t.connectors.skipped
-            : t.connectors.notConnected
+        const line = updated
+          ? copy.updated(title)
+          : connected
+            ? row.toolsUnavailable
+              ? `${DONE[action](copy, title)} · ${t.connectors.authorizedToolsUnavailable}`
+              : DONE[action](copy, title)
+            : row.state === 'skipped'
+              ? t.connectors.skipped
+              : t.connectors.notConnected
 
         return (
           <ConnectorSummary
             connector={{ name: row.name, title }}
             key={row.name}
             meta={connected && row.tools > 0 ? `${line} · ${copy.toolCount(row.tools)}` : line}
-            tone={connected ? 'ok' : undefined}
+            tone={connected || updated ? 'ok' : undefined}
           />
         )
       })}
@@ -204,9 +211,9 @@ export function McpSetupPending(props: ToolCallMessagePartProps) {
   )
 
   const request = useStore($request)
-  const action = useMemo(() => readSetupAction(props.args), [props.args])
   // The session's operation belongs to one tool call; another call's request never paints here.
   const live = connectionRequestOwnsPart(props, request)
+  const action = live && request?.targets[0]?.action === 'update' ? 'update' : readSetupAction(props.args)
   const owner = useConnectionOwner(storedId, live)
 
   // `tool.start` arrives before `connection.request`.
@@ -249,7 +256,7 @@ export function McpSetupOffer({ action, owner, request }: McpSetupOfferProps) {
   useConnectorFocusHandoff(request.targets, cardRef)
 
   // Try again is one RPC on the open operation. An authorize target comes back with a fresh link,
-  // which opens at once; install and enable simply run again and report through connection.update.
+  // which opens at once; install, enable and update run again and report through connection.update.
   const reissue = async (name: string): Promise<void> => {
     if (!owner) {
       return
@@ -328,7 +335,7 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
       if (!target.discoveryError && target.tools.length > 0) {
         setSetupOpen(false)
       }
-    } else if (target.state === 'skipped') {
+    } else if (target.state === 'skipped' || target.state === 'updated') {
       setSetupOpen(false)
     }
   }, [target.discoveryError, target.state, target.tools.length])
@@ -368,13 +375,16 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
   }
 
   const label = VERB[action](copy)
+  // An update has no credential fields, but its redacted change summary still needs review and a
+  // per-target Not now path before consent, just like a setup form.
+  const needsReview = fields.length > 0 || action === 'update'
 
   const ACTIONS = {
     approve: {
-      busy: fields.length === 0 && sending,
-      disabled: fields.length === 0 && sending,
+      busy: !needsReview && sending,
+      disabled: !needsReview && sending,
       label,
-      onClick: () => (fields.length > 0 ? setSetupOpen(true) : void approve())
+      onClick: () => (needsReview ? setSetupOpen(true) : void approve())
     },
     open: {
       disabled: target.connectUrl === null,
@@ -392,11 +402,13 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
 
   const displayServer = prettyName(server)
 
-  const rowCue = target.discoveryError
-    ? t.connectors.authorizedToolsUnavailable
-    : verb === 'open'
-      ? t.connectors.waiting
-      : undefined
+  const rowCue = target.state === 'updated'
+    ? t.connectors.updated
+    : target.discoveryError
+      ? t.connectors.authorizedToolsUnavailable
+      : verb === 'open'
+        ? t.connectors.waiting
+        : undefined
 
   // What approving runs or contacts, shown until the row resolves. Plain text from the backend's
   // scrubbed line: React escapes it. The backend never cuts the line, so it wraps in full; a very
@@ -410,7 +422,7 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
         connector={{ name: server, title: displayServer }}
         cue={rowCue}
         mark={phase.mark}
-        markLabel={MARK_LABEL[phase.mark](t.connectors)}
+        markLabel={target.state === 'updated' ? t.connectors.updated : MARK_LABEL[phase.mark](t.connectors)}
       />
       {launch ? (
         <p
@@ -425,15 +437,15 @@ function McpSetupRow({ action, onReissue, reissueBlocked, reissuing, request, ta
       <SetupFormDialog
         copy={{
           cancel: t.connectors.setupCancel,
-          connect: t.connectors.connect,
+          connect: action === 'update' ? label : t.connectors.connect,
           openInBrowser: t.connectors.openInBrowser,
-          setup: t.connectors.setup
+          setup: action === 'update' ? copy.updateSetup : t.connectors.setup
         }}
         detail={target.detail}
         fields={fields}
         instructions={target.instructions}
         onCancel={() => void cancelSetup()}
-        onConnect={env => void approve(env)}
+        onConnect={env => void approve(action === 'update' ? undefined : env)}
         onOpenBrowser={() => {
           if (target.connectUrl) {
             void window.hermesDesktop?.openExternal?.(target.connectUrl)

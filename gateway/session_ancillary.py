@@ -155,12 +155,20 @@ async def attach_file(connection, ref, params):
         raise RuntimeStoreError('permission_denied')
     from gateway.session_policy import policy_for_source
     authority = connection.authority
-    policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
-    if policy is None:
+    source = authority.sessions[ref.session_id].source
+    if source is None:  # a history mount runs nothing
         raise RuntimeStoreError('permission_denied')
+    policy = policy_for_source(authority.runner, source)
     # The staging helpers are bound onto the sidecar module's globals (method_ctx.bind_module).
     from tui_gateway import server
-    session = {'cwd': policy.cwd, 'profile_home': authority.profile_id}
+    if policy is not None:
+        session = {'cwd': policy.cwd, 'profile_home': authority.profile_id}
+    else:
+        # Local change: a platform session (QQ, ...) has no frozen LOCAL policy. Stage into the owner
+        # profile's attachments/ like any other attach, using the gateway terminal cwd its turns run in,
+        # and hand back an absolute ref so it resolves whatever that cwd is.
+        from gateway.run import _terminal_scope_cwd
+        session = {'cwd': _terminal_scope_cwd(authority.profile_id), 'profile_home': authority.profile_id}
 
     def stage():
         if staged_upload is not None:
@@ -175,7 +183,7 @@ async def attach_file(connection, ref, params):
         raise RuntimeStoreError('invalid_params') from exc
     except OSError as exc:
         raise RuntimeStoreError('storage_unavailable') from exc
-    ref_path = server._attachment_ref_path(session, stored)
+    ref_path = server._attachment_ref_path(session, stored) if policy is not None else str(stored.resolve())
     return {'attached': True, 'name': stored.name, 'path': str(stored), 'ref_path': ref_path,
             'ref_text': f'@file:{server._format_ref_value(ref_path)}', 'uploaded': uploaded}
 

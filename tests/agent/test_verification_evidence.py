@@ -66,6 +66,19 @@ def test_lint_and_typecheck_are_not_reported_as_full_tests(tmp_path, monkeypatch
     assert test.scope == "targeted"
 
 
+def test_pytest_is_a_fallback_verifier_without_project_recipe(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+
+    passed = classify_verification_command("python -m pytest", cwd=tmp_path, session_id="s1", exit_code=0)
+    failed = classify_verification_command("pytest", cwd=tmp_path, session_id="s1", exit_code=1)
+    masked = classify_verification_command("pytest || true", cwd=tmp_path, session_id="s1", exit_code=0)
+
+    assert passed is not None and passed.status == "passed"
+    assert failed is not None and failed.status == "failed"
+    assert masked is None
+
+
 
 
 def test_shell_wrappers_match_but_echo_does_not(tmp_path, monkeypatch):

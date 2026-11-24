@@ -43,12 +43,13 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
         pass
 
     variants = list(approval_detection._command_detection_variants(command))
+    hardline_allow = None
 
     def result(verdict: str, rule=None, detail: str = "") -> dict:
         return {
             "command": command, "env_type": env_type, "verdict": verdict,
             "exit_code": _VERDICT_EXIT[verdict], "rule": rule, "detail": detail,
-            "normalized_variants": variants,
+            "normalized_variants": variants, "hardline_allow": hardline_allow,
         }
 
     # 1. Isolated container backends skip every guard except the operator's approvals.deny
@@ -67,8 +68,9 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
                     "the runtime skips all command guards for it except approvals.deny"),
         )
 
-    # 2. Hardline blocklist — never bypassable, even under yolo.
-    is_hardline, hardline_desc = approval_detection.detect_hardline_command(command)
+    # 2. Hardline blocklist — never bypassable, even under yolo, unless the operator
+    #    allow-listed the class in approvals.hardline_allow.
+    is_hardline, hardline_desc, hardline_allow = approval_floors.hardline_verdict(command)
     if is_hardline:
         return result(
             "hardline-deny", rule=hardline_desc,

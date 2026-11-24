@@ -3666,6 +3666,10 @@ export const ruOverrides = {
       credentialsHeading: 'Учётные данные'
     },
     mcpSetup: {
+      updateTitle: 'Обновить MCP-серверы',
+      updateAction: 'Обновить',
+      updateSetup: server => `Обновить ${server}`,
+      updated: server => `${server} обновлён`,
       installTitle: 'Добавить MCP-серверы',
       enableTitle: 'Включить MCP-серверы',
       authorizeTitle: 'Авторизовать MCP-серверы',

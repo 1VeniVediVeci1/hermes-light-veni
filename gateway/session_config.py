@@ -227,17 +227,25 @@ async def model_options(connection, ref, params):
             or any(type(params[k]) is not bool for k in flags & params.keys())):
         raise RuntimeStoreError('invalid_params')
     policy = _authorize(connection, ref, params)
-    agent = connection.authority.agent(ref) if ref.session_id else None
-    provider = getattr(agent, 'provider', None) or (policy.provider if policy else None)
-    model = getattr(agent, 'model', None) or (policy.model if policy else None)
-    base_url = getattr(agent, 'base_url', None) or (policy.base_url if policy else None)
+    authority = connection.authority
+    live = authority.sessions[ref.session_id] if ref.session_id else None
+    agent = authority.agent(ref) if live is not None else None
 
     def discover():
+        from gateway.config import Platform
         from gateway.run import _profile_runtime_scope
+        from gateway.session_messaging_picks import messaging_model_route
         from hermes_cli.inventory import load_picker_context, build_model_options_payload
-        with _profile_runtime_scope(Path(connection.authority.profile_id)):
+        with _profile_runtime_scope(Path(authority.profile_id)):
+            if agent is None and policy is None and live is not None and live.source is not None and live.source.platform != Platform.LOCAL:
+                # A model pick evicts the cached agent. Read the saved chat override instead of
+                # reverting the picker to the profile default until the next turn builds an agent.
+                model, selected, base_url, _ = messaging_model_route(authority.runner, live)
+            else:
+                selected = getattr(agent, 'provider', None) or (policy.provider if policy else None)
+                model = getattr(agent, 'model', None) or (policy.model if policy else None)
+                base_url = getattr(agent, 'base_url', None) or (policy.base_url if policy else None)
             ctx = load_picker_context()
-            selected = provider
             if selected == 'custom':
                 from hermes_cli.runtime_provider import canonical_custom_identity
                 selected = canonical_custom_identity(base_url=base_url, config_provider=ctx.current_provider, model=model,

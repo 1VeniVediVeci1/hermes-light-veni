@@ -54,6 +54,7 @@ class TurnContext:
     session_key: Optional[str] = None
     run_generation: Optional[int] = None
     process_task_id: str = ""
+    process_completion_batch: Any = None
     process_baseline: frozenset[str] = field(default_factory=frozenset)
     _interrupt_depth: int = 0
     event_message_id: Optional[str] = None

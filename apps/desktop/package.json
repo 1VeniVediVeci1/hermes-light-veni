@@ -35,6 +35,7 @@
     "prebuilder": "node scripts/patch-electron-builder-mac-binary.mjs",
     "builder": "node scripts/run-electron-builder.mjs",
     "pack": "pnpm run build && pnpm run builder --dir --publish never",
+    "release:light": "node scripts/release-light.mjs",
     "dist": "pnpm run build && pnpm run builder",
     "payload": "node ../../scripts/build/python.mjs ../../scripts/bundles/stage.py --out build/agent-payload",
     "dist:bundled": "pnpm run payload && cross-env HERMES_DESKTOP_VARIANT=bundled pnpm run dist",

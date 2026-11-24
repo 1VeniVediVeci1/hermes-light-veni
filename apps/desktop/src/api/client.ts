@@ -26,6 +26,7 @@ import { DialReadiness, GATEWAY_NOT_CONNECTED_MESSAGE, remainingRequestBudget } 
 // keep the short default so a genuinely-dead backend is still detected fast.
 export const STARTUP_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
+const ATTACHMENT_METHODS = new Set(['file.attach', 'image.attach', 'image.attach_bytes', 'pdf.attach', 'groups.attachment.upload'])
 // prompt.submit is effectively fire-and-forget: turn completion is signaled by
 // stream / message.complete events, NOT by the RPC return. A long turn (MoA
 // presets running references + aggregator in series, deep reasoning, large tool
@@ -423,6 +424,9 @@ export class HermesGateway extends JsonRpcGatewayClient {
 
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     const generation = this.connectionGeneration
+    // Attachment RPCs can carry the entire file in one frame, even outside the composer.
+    const isAttachment = ATTACHMENT_METHODS.has(method)
+    timeoutMs ??= isAttachment ? 0 : undefined
     const deadline = requestDeadline(timeoutMs)
 
     // Once readiness has settled (always, on a native dial) a request sends at once, as on main.
@@ -439,7 +443,9 @@ export class HermesGateway extends JsonRpcGatewayClient {
     if (redirected) { return redirected }
     params = this.routeCanonicalParams(method, params)
 
-    await this.attachForRequest(method, params, deadline, signal)
+    // The preparatory session.resume is not a file transfer.
+    const attachDeadline = isAttachment && !Number.isFinite(deadline) ? requestDeadline(undefined) : deadline
+    await this.attachForRequest(method, params, attachDeadline, signal)
     this.requireConnectionGeneration(generation)
     // The attach may have identified the named launch profile behind an
     // implicit route. Its revision and generation are cached under that owner.

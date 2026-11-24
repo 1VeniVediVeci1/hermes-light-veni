@@ -182,14 +182,9 @@ def test_fs_routes_workspace_reads_to_ssh_backend(client, monkeypatch):
         ("list", "/srv/repos"),
         ("branch", "/srv/repos"),
         ("inspect", "/srv/repos/project/README.md"),
-        (
-            "read",
-            "/srv/repos/project/README.md",
-            file_routes._FS_TEXT_SOURCE_MAX_BYTES,
-            file_routes._FS_TEXT_PREVIEW_MAX_BYTES,
-        ),
+        ("read", "/srv/repos/project/README.md", None, None),
         ("inspect", "/srv/repos/project/logo.png"),
-        ("read", "/srv/repos/project/logo.png", web_server._FS_DATA_URL_MAX_BYTES, None),
+        ("read", "/srv/repos/project/logo.png", None, None),
         ("write", "/srv/repos/project/README.md", "updated", file_routes._FS_TEXT_WRITE_MAX_BYTES),
         ("git-root", "/srv/repos/project/src"),
         ("inspect", "/srv/repos/project/report.txt"),
@@ -410,11 +405,13 @@ def test_fs_ssh_readers_refuse_a_resolved_name_the_adapter_would_rewrite(client,
         def __init__(self):
             self.commands = []
 
-        def execute(self, command, **_kwargs):
+        def _run_ssh(self, command, *, timeout):
+            from subprocess import CompletedProcess
+
             self.commands.append(command)
             if len(self.commands) > 1:
                 pytest.fail("a path the adapter rewrites must not be read")
-            return {"returncode": 0, "output": f"__HERMES_FS_TARGET__:{resolved}\n__HERMES_FS_SIZE__:8\n"}
+            return CompletedProcess([], 0, f"__HERMES_FS_TARGET__:{resolved}\n__HERMES_FS_SIZE__:8\n")
 
         def _build_ssh_command(self):
             pytest.fail("a path the adapter rewrites must not be streamed")
@@ -439,7 +436,6 @@ def test_fs_download_streams_ssh_files_without_preview_cap(client, monkeypatch):
             yield b"123"
             yield b"456"
 
-    monkeypatch.setattr(file_routes, "_FS_TEXT_SOURCE_MAX_BYTES", 3)
     monkeypatch.setattr(file_routes, "_fs_backend", lambda profile=None: FakeSshFs())
 
     response = client.get(
@@ -521,18 +517,7 @@ def test_a_browser_download_reads_the_ssh_workspace_file_it_listed(client, monke
         anchor.close()
 
 
-def test_fs_read_data_url_rejects_over_cap(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(web_server, "_FS_DATA_URL_MAX_BYTES", 3)
-    target = tmp_path / "image.png"
-    target.write_bytes(b"1234")
-
-    response = client.get("/api/fs/read-data-url", params={"path": str(target)})
-
-    assert response.status_code == 413
-
-
-def test_fs_download_streams_file_without_data_url_cap(client, tmp_path, monkeypatch):
-    monkeypatch.setattr(web_server, "_FS_DATA_URL_MAX_BYTES", 3)
+def test_fs_download_streams_file(client, tmp_path):
     target = tmp_path / "report with spaces.pdf"
     target.write_bytes(b"123456")
 

@@ -7,7 +7,6 @@ import { $connection } from '@/store/session'
 import { clearWebappSession, seedWebappSession } from '@/test/webapp-session'
 
 import { installBrowserDesktopBridge } from './browser-desktop-bridge'
-import { BROWSER_UPLOAD_MAX_BYTES } from './browser-uploads'
 
 afterEach(() => {
   cleanup()
@@ -28,22 +27,7 @@ function png(size: number): Uint8Array {
 }
 
 describe('browser image paste size', () => {
-  // A pasted or dropped image is staged on the host, and sending the message reads it back through
-  // /api/fs/read-data-url, which stops at 16 MiB. An image over that limit is refused at the paste,
-  // with the limit named, instead of attaching an image the message can never send.
-  it('refuses an image larger than the browser can send, before uploading it', async () => {
-    seedWebappSession('served-token')
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-    expect(installBrowserDesktopBridge()).toBe(true)
-
-    await expect(window.hermesDesktop!.saveImageBuffer(png(BROWSER_UPLOAD_MAX_BYTES + 1), '.png')).rejects.toThrow(
-      'The image is larger than 16 MiB, the largest image the browser can send.'
-    )
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('stages an image of exactly the limit', async () => {
+  it('stages an image over the old 16 MiB limit without a deadline', async () => {
     seedWebappSession('served-token')
 
     const fetchMock = vi.fn().mockResolvedValue(
@@ -53,27 +37,26 @@ describe('browser image paste size', () => {
     vi.stubGlobal('fetch', fetchMock)
     expect(installBrowserDesktopBridge()).toBe(true)
 
-    await expect(window.hermesDesktop!.saveImageBuffer(png(BROWSER_UPLOAD_MAX_BYTES), '.png')).resolves.toBe(
+    await expect(window.hermesDesktop!.saveImageBuffer(png(16 * 1024 * 1024 + 1), '.png')).resolves.toBe(
       '/srv/hermes/cache/images/upload.png'
     )
-    expect((fetchMock.mock.calls[0] as [URL])[0].pathname).toBe('/api/chat/image-upload')
+    expect((fetchMock.mock.calls[0] as [URL, RequestInit])[0].pathname).toBe('/api/chat/image-upload')
+    expect((fetchMock.mock.calls[0] as [URL, RequestInit])[1].signal).toBeUndefined()
   })
 })
 
 describe('browser file stage size', () => {
-  // A picked or dropped file over the upload limit gets the server's 413 "Upload request is too large",
-  // which doesn't say what the limit is, and a refused image pick used to show nothing at all.
-  const tooLarge = (name: string, type: string) => new File([new Uint8Array(BROWSER_UPLOAD_MAX_BYTES + 1)], name, { type })
-  const limitMessage = 'The file is larger than 16 MiB, the largest file the browser can attach.'
+  const overImageLimit = (name: string, type: string) =>
+    new File([new Uint8Array(16 * 1024 * 1024 + 1)], name, { type })
 
   async function installBrowser() {
     seedWebappSession('served-token')
 
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), window.location.origin)
 
-      if (url.pathname === '/api/chat/file-upload') {
-        return new Response(JSON.stringify({ detail: 'Upload request is too large' }), { status: 413 })
+      if (url.pathname === '/api/chat/file-upload' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ path: '/srv/hermes/uploads/huge.zip' }), { status: 200 })
       }
 
       throw new Error(`Unexpected fetch: ${url}`)
@@ -91,30 +74,13 @@ describe('browser file stage size', () => {
   const renderComposer = () =>
     renderHook(() => useComposerActions({ activeSessionId: null, currentCwd: '/workspace', requestGateway: vi.fn() }))
 
-  it('refuses a picked image over the limit, names the limit, and uploads nothing', async () => {
+  it('uploads a picked non-image file over 16 MiB without an error', async () => {
     const { uploads } = await installBrowser()
     const { result } = renderComposer()
+    const file = overImageLimit('huge.zip', 'application/zip')
 
     vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
-      Object.defineProperty(this, 'files', { configurable: true, value: [tooLarge('huge.png', 'image/png')] })
-      this.dispatchEvent(new Event('change'))
-    })
-
-    await act(async () => {
-      await result.current.pickImages()
-    })
-
-    expect(uploads()).toHaveLength(0)
-    expect($notifications.get()).toContainEqual(expect.objectContaining({ kind: 'error', message: limitMessage }))
-  })
-
-  // Attach → Files… used to leave the refused stage as an unhandled rejection, with nothing shown.
-  it('refuses a picked file over the limit with one notice naming the limit, and uploads nothing', async () => {
-    const { uploads } = await installBrowser()
-    const { result } = renderComposer()
-
-    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
-      Object.defineProperty(this, 'files', { configurable: true, value: [tooLarge('huge.zip', 'application/zip')] })
+      Object.defineProperty(this, 'files', { configurable: true, value: [file] })
       this.dispatchEvent(new Event('change'))
     })
 
@@ -122,41 +88,9 @@ describe('browser file stage size', () => {
       await result.current.pickContextPaths('file')
     })
 
-    expect(uploads()).toHaveLength(0)
-    expect($notifications.get()).toEqual([
-      expect.objectContaining({ kind: 'error', message: limitMessage, title: 'Attach failed' })
-    ])
-  })
-
-  it('names the limit when a dropped file over it cannot be attached', async () => {
-    const { uploads } = await installBrowser()
-    const { result } = renderComposer()
-    let attached = true
-
-    await act(async () => {
-      attached = await result.current.attachDroppedItems([{ file: tooLarge('huge.zip', 'application/zip'), path: '' }])
-    })
-
-    expect(attached).toBe(false)
-    expect(uploads()).toHaveLength(0)
-    expect($notifications.get()).toContainEqual(
-      expect.objectContaining({ kind: 'warning', message: `Could not attach huge.zip: ${limitMessage}` })
-    )
-  })
-
-  // The reason is the same for any name: a long one used to push it past readableError's length cap.
-  it('still names the limit when the dropped file has a long name', async () => {
-    await installBrowser()
-    const { result } = renderComposer()
-    const name = `${'a'.repeat(150)}.zip`
-
-    await act(async () => {
-      await result.current.attachDroppedItems([{ file: tooLarge(name, 'application/zip'), path: '' }])
-    })
-
-    const warning = $notifications.get().find(notice => notice.kind === 'warning')
-
-    expect(warning?.message).toMatch(/^Could not attach a+/)
-    expect(warning?.message).toContain(limitMessage)
+    const requests = uploads()
+    expect(requests).toHaveLength(1)
+    expect((requests[0]?.[1]?.body as FormData).get('file')).toMatchObject({ name: file.name, size: file.size })
+    expect($notifications.get()).toHaveLength(0)
   })
 })

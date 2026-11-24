@@ -226,6 +226,10 @@ class GatewayTurnPrepareMixin:
             override_model = override.get("model", model)
             override_runtime = _session_override_snapshot(override)
             if override_runtime.get("api_key") and not managed_oauth:
+                from hermes_cli.route_controls import live_agent_controls
+                override_runtime.update(live_agent_controls({
+                    **override_runtime, "timeout_provider": override.get("timeout_provider"),
+                    "provider_streaming": override.get("provider_streaming")}))
                 if override_runtime.get("credential_pool") is None:
                     override_runtime["credential_pool"] = _credential_pool_for_provider(override.get("provider"))
                 logger.debug(
@@ -319,7 +323,7 @@ class GatewayTurnPrepareMixin:
         runtime = {
             k: runtime_kwargs.get(k) for k in (
                 "api_key", "base_url", "provider", "requested_provider", "api_mode", "command", "args",
-                "credential_pool", "max_tokens", "capabilities",
+                "credential_pool", "max_tokens", "capabilities", "provider_streaming", "timeout_provider",
             )
         }
         runtime["args"] = list(runtime["args"] or [])

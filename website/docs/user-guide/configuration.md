@@ -3206,6 +3206,19 @@ approvals:
 
 Patterns are case-insensitive fnmatch globs and must be quoted in YAML (a bare leading `*` is a parse error). See [Security — User-Defined Deny Rules](./security.md#user-defined-deny-rules-approvalsdeny) for details.
 
+### Hardline allow list
+
+`approvals.hardline_allow` is the opposite direction: globs that exempt a command from the built-in hardline blocklist (the floor below `--yolo`). It is consulted only after a hardline rule already matched, so `"*shutdown*"` lets the agent reboot the host without also allowing anything else. An exempted command still goes through the normal approval layer.
+
+```yaml
+approvals:
+  hardline_allow:
+    - "*shutdown*"
+    - "*Restart-Computer*"
+```
+
+See [Security — Hardline Allow List](./security.md#hardline-allow-list-approvalshardline_allow).
+
 ### Custom smart-approval policy
 
 `approvals.smart_policy` lets you append your own rules to the smart-approval reviewer's instructions. When set, the text is added to the guardian LLM's system prompt (the trusted channel — never alongside the untrusted command text), so you can tighten or relax its judgment for your environment without editing code:

@@ -1,7 +1,8 @@
 import { cleanup } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
 
-import { hermesApi, HermesGateway } from '@/api/client'
+import { HermesGateway } from '@/api/client'
+import type { HermesApiRequest } from '@/global'
 import { $composerAttachments } from '@/store/composer'
 import { $connectionWires, recordConnectionWire } from '@/store/connection-wire'
 import { requestGatewayForAgent } from '@/store/gateway'
@@ -14,9 +15,6 @@ interface FixtureSocket {
   send(data: string): void
 }
 
-vi.mock('@/api/client', async importOriginal => ({
-  ...(await importOriginal<Record<string, unknown>>()), hermesApi: vi.fn()
-}))
 vi.mock('@/hermes', () => ({
   getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: RUNTIME_SESSION_ID })),
   getProfiles: vi.fn(async () => ({ profiles: [] })), getSession: vi.fn(),
@@ -38,7 +36,7 @@ afterEach(() => {
 })
 
 // Real composer upload/submit and real protocol client. Only the remote service,
-// native file read and connection-pool selection are fixtures.
+// native Desktop bridge and connection-pool selection are fixtures.
 test.each(['public-canonical', 'public-legacy', 'native-canonical'] as const)('%s image submission preserves delivery semantics', async transport => {
   const canonical = transport !== 'public-legacy'
   const native = transport === 'native-canonical'
@@ -47,6 +45,7 @@ test.each(['public-canonical', 'public-legacy', 'native-canonical'] as const)('%
   vi.stubGlobal('WebSocket', WebSocket)
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await new Promise<void>(resolve => server.once('listening', resolve))
+  const imagePath = '/gateway/cache/images/fixture.png'
   const frames: Array<{ method: string; params: Record<string, unknown> }> = []
   server.on('connection', (socket: FixtureSocket) => {
     socket.on('message', bytes => {
@@ -60,8 +59,8 @@ test.each(['public-canonical', 'public-legacy', 'native-canonical'] as const)('%
           running: false, messages: [], prompts: [], info: { profile_name: 'work' } }
       }
 
-      if (frame.method === 'image.attach_bytes') {
-        result = { attached: true, path: '/gateway/cache/images/fixture.png', mime: 'image/png' }
+      if (frame.method === 'image.attach') {
+        result = { attached: true, path: imagePath, mime: 'image/png' }
       }
 
       if (frame.method === 'prompt.submit') {
@@ -84,7 +83,12 @@ test.each(['public-canonical', 'public-legacy', 'native-canonical'] as const)('%
   // The public cases have no native_dial marker or locally patched resolver.
   const wsUrl = `ws://127.0.0.1:${port}/api/ws?ticket=fixture${native ? '&native_dial=1' : ''}`
   const previous = window.hermesDesktop
-  window.hermesDesktop = { ...previous, readFileDataUrl: vi.fn(async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jC5sAAAAASUVORK5CYII=') }
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jC5sAAAAASUVORK5CYII='
+  const api = vi.fn(async ({ path }: HermesApiRequest) => {
+    if (path !== '/api/chat/image-upload') { throw new Error(`Unexpected API request: ${path}`) }
+    return { path: imagePath, mime_type: 'image/png' } as never
+  })
+  window.hermesDesktop = { ...previous, api, readFileDataUrl: vi.fn(async () => dataUrl) }
 
   try {
     await client.connect(wsUrl)
@@ -96,7 +100,6 @@ test.each(['public-canonical', 'public-legacy', 'native-canonical'] as const)('%
     setSessionOwnerHint(RUNTIME_SESSION_ID, { connectionId: 'remote', profile: 'work', mode: native ? 'local' : 'remote' })
     vi.mocked(requestGatewayForAgent).mockImplementation((_connectionId, profile, method, params, timeout, signal) =>
       client.request(method, { ...params, profile }, timeout, signal))
-    vi.mocked(hermesApi).mockResolvedValue({ path: '/gateway/cache/images/fixture.png', mime_type: 'image/png' })
 
     // Positive control: the real client negotiated and adapts an ordinary send.
     const receipt = await client.request('prompt.submit', {
@@ -114,16 +117,19 @@ test.each(['public-canonical', 'public-legacy', 'native-canonical'] as const)('%
     const imageSubmit = frames.filter(frame => frame.method === 'prompt.submit').at(-1)!
     expect(imageSubmit.params.text).toContain('Describe the attached image')
 
+    expect(api).toHaveBeenCalledExactlyOnceWith({
+      method: 'POST', path: '/api/chat/image-upload', connectionId: 'remote', profile: 'work',
+      body: { data_url: dataUrl, filename: 'fixture.png' }
+    })
+    const imageFrames = frames.filter(frame => frame.method.startsWith('image.'))
     if (canonical) {
-      expect(imageSubmit.params.attachments).toEqual([{ path: '/gateway/cache/images/fixture.png', mime: 'image/png' }])
-      expect(hermesApi).toHaveBeenCalledWith(expect.objectContaining({
-        path: '/api/chat/image-upload', connectionId: 'remote', profile: 'work'
-      }))
-      expect(frames.some(frame => frame.method === 'image.attach_bytes')).toBe(false)
+      expect(imageSubmit.params.attachments).toEqual([{ path: imagePath, mime: 'image/png' }])
+      expect(imageFrames).toEqual([])
     } else {
-      expect(frames.some(frame => frame.method === 'image.attach_bytes')).toBe(true)
+      expect(imageFrames).toEqual([expect.objectContaining({ method: 'image.attach', params: {
+        path: imagePath, profile: 'work', session_id: RUNTIME_SESSION_ID
+      } })])
       expect(imageSubmit.params).not.toHaveProperty('attachments')
-      expect(hermesApi).not.toHaveBeenCalled()
     }
 
   } finally {

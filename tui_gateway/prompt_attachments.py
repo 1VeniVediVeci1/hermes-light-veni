@@ -19,8 +19,6 @@ _registry = HandlerRegistry()
 # by path is copied in chunks and has no cap; a browser upload's copy has the tighter browser cap.
 _ATTACHMENT_MAX_BYTES = 256 * 1024 * 1024
 _ATTACH_BYTES_MAX_BYTES = 25 * 1024 * 1024
-_PDF_ATTACH_MAX_BYTES = 50 * 1024 * 1024
-_PDF_ATTACH_MAX_PAGES = 25
 
 # Leading magic bytes -> file extension, for filename-less uploads.
 _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
@@ -38,17 +36,19 @@ def _too_large(label: str, size: int, max_bytes: int) -> str:
 
 
 def _b64_payload(
-    raw: str, data_url_re: str, flags: int, *, max_bytes: int, label: str = "attachment",
+    raw: str, data_url_re: str, flags: int, *, max_bytes: int | None, label: str = "attachment",
 ) -> bytes:
     """Strip an optional ``data:...;base64,`` wrapper and all whitespace, then strictly decode.
     Over *max_bytes* raises ``OverflowError`` with the refusal, before decoding when the base64
-    text is already too long."""
+    text is already too long. ``None`` means no cap (``attachments.max_bytes: 0``)."""
     import base64 as _base64
     import re as _re
     cleaned = (raw or "").strip()
     if m := _re.match(data_url_re, cleaned, flags):
         cleaned = m.group(1)
     cleaned = _re.sub(r"\s+", "", cleaned)
+    if max_bytes is None:
+        return _base64.b64decode(cleaned, validate=True)
     if len(cleaned) > 4 * ((max_bytes + 2) // 3):
         padding = len(cleaned) - len(cleaned.rstrip("="))
         raise OverflowError(_too_large(label, len(cleaned) * 3 // 4 - padding, max_bytes))
@@ -59,7 +59,7 @@ def _b64_payload(
 
 
 def _decode_attach_base64(
-    raw: str, *, mime_prefix: str, max_bytes: int, label: str = "attachment",
+    raw: str, *, mime_prefix: str, max_bytes: int | None, label: str = "attachment",
 ) -> bytes | None:
     """Decode a (``data:<mime_prefix>...;base64,``-wrapped) payload; None when invalid."""
     import re as _re
@@ -74,7 +74,7 @@ def _decode_attach_base64(
 
 
 def _decode_attach_payload(
-    rid, raw_b64: str, *, mime_prefix: str, max_bytes: int, label: str, empty_msg: str):
+    rid, raw_b64: str, *, mime_prefix: str, max_bytes: int | None, label: str, empty_msg: str):
     """``(bytes, None)`` or ``(None, error)``: 4017 on bad/empty base64, 4018 over *max_bytes*."""
     try:
         data = _decode_attach_base64(
@@ -250,6 +250,7 @@ def _stage_browser_file_attachment(session: dict, staged_upload: object, name: s
     the copy is the native Desktop's out-of-workspace file attach, capped at the browser limit.
     """
     from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES
+    from hermes_cli.attachment_limits import attachment_size_cap
     from hermes_cli.staged_uploads import parse_staged_upload, resolve_staged_upload
 
     raw_home, raw_path = parse_staged_upload(staged_upload)
@@ -257,8 +258,8 @@ def _stage_browser_file_attachment(session: dict, staged_upload: object, name: s
     # Copied into attachments/ even inside the workspace: the upload route prunes its staging after
     # 7 days. attachments/ is also visible to container/SSH terminal backends through cache mounts.
     return _stage_session_file_attachment(
-        session, raw_path=str(source), data_url="", name=name, max_bytes=WEBAPP_ATTACHMENT_MAX_BYTES,
-        staged=True)
+        session, raw_path=str(source), data_url="", name=name,
+        max_bytes=attachment_size_cap(WEBAPP_ATTACHMENT_MAX_BYTES), staged=True)
 
 
 def _referenced_in_place(session: dict, path: Path, workspace: Path, *, staged: bool) -> bool:
@@ -313,7 +314,10 @@ def _stage_session_file_attachment(
         # Any media type (unlike the image-specific decoder); bare base64 also accepted.
         import binascii as _binascii
         import re as _re
-        inline_max = _ATTACHMENT_MAX_BYTES if max_bytes is None else min(max_bytes, _ATTACHMENT_MAX_BYTES)
+        from hermes_cli.attachment_limits import attachment_size_cap
+        inline_max = attachment_size_cap(_ATTACHMENT_MAX_BYTES)
+        if max_bytes is not None:
+            inline_max = max_bytes if inline_max is None else min(max_bytes, inline_max)
         try:
             payload = _b64_payload(
                 data_url, r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", _re.DOTALL | _re.IGNORECASE,

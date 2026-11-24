@@ -624,9 +624,17 @@ def _stream_env_stale_base() -> tuple[float, bool]:
     return env_float("HERMES_STREAM_STALE_TIMEOUT", 180.0), "HERMES_STREAM_STALE_TIMEOUT" in os.environ
 
 
+def _stream_timeout_provider_id(agent) -> str:
+    """Use AIAgent's logical route identity, with compatibility for lightweight agents."""
+    resolver = getattr(agent, "_timeout_provider_id", None)
+    if callable(resolver):
+        return resolver()
+    return str(getattr(agent, "_timeout_provider", "") or getattr(agent, "provider", "")).strip().lower()
+
+
 def _stream_stale_timeout_is_explicit(agent) -> bool:
     """A per-provider ``stale_timeout_seconds`` or HERMES_STREAM_STALE_TIMEOUT is set, whatever its value."""
-    return get_provider_stale_timeout(agent.provider, agent.model) is not None or _stream_env_stale_base()[1]
+    return get_provider_stale_timeout(_stream_timeout_provider_id(agent), agent.model) is not None or _stream_env_stale_base()[1]
 
 
 def _local_stream_stale_timeout_default() -> float:
@@ -690,7 +698,7 @@ def _cloud_stale_timeout_for(agent, api_kwargs: dict) -> float:
     wins over every implicit floor — the context-size tier as well as the reasoning-model
     floor — so it can SHORTEN patience for a hung stream (#115024). Only the 180s default
     is scaled and floored."""
-    explicit = get_provider_stale_timeout(agent.provider, agent.model)
+    explicit = get_provider_stale_timeout(_stream_timeout_provider_id(agent), agent.model)
     if explicit is not None:
         return explicit
     base, explicit_env = _stream_env_stale_base()
@@ -802,11 +810,9 @@ def should_use_direct_api_call(agent) -> bool:
     which ``interrupt()`` invokes cross-thread (#72227). Cron also inlines Codex
     Responses (#69734): both Codex paths (non-stream, and streaming via
     ``_stream_codex_passthrough`` -> ``_interruptible_api_call``) reach
-    ``direct_api_call``, whose client comes from ``make_client`` so the inline stale
-    watchdog can abort it; the stale budget keeps the openai-codex floor/hard cap.
-    Trade-off: the worker-only Codex TTFB/progress/idle watchdogs don't run inline, so
-    a Codex call that never sends a first byte waits the full wall-clock stale budget
-    (600-1200s on large contexts) instead of the ~120s TTFB cutoff. Delegated children
+    ``direct_api_call``. Responses shares the worker's request-local watchdog policy:
+    an observer may shutdown sockets, but SDK dispatch/consumption/close stay inline.
+    TTFB, first-progress, idle and absolute caps therefore apply on both paths. Delegated children
     and Native/Bedrock/MoA keep their workers: cancellation and client ownership differ.
     """
     api_mode = getattr(agent, "api_mode", None)
@@ -832,16 +838,15 @@ _DIRECT_API_ACTIVITY_HEARTBEAT_SECONDS = 15.0
 
 def _resolve_direct_stale_timeout(agent, api_kwargs: dict) -> float:
     """Stale budget for the inline call via ``agent._compute_non_stream_stale_timeout``,
-    plus the same openai-codex floor/hard cap the worker path applies (inline cron Codex,
+    plus the same Responses floor/hard/run-budget caps the worker path applies (inline cron Codex,
     #69734). A non-numeric result (stub agent) leaves the watchdog disarmed; a resolver
     that *raises* propagates — swallowing into ``inf`` would reinstate the hang."""
     resolver = getattr(agent, "_compute_non_stream_stale_timeout", None)
     value = resolver(api_kwargs) if callable(resolver) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return float("inf")
-    base_url = getattr(agent, "base_url", None)
-    if getattr(agent, "api_mode", None) == "codex_responses" and not (base_url and is_local_endpoint(base_url)):
-        return _bound_openai_codex_stale_timeout(float(value), estimate_request_context_tokens(api_kwargs))
+    if getattr(agent, "api_mode", None) == "codex_responses":
+        return _resolve_nonstream_watchdogs(agent, api_kwargs).stale_timeout
     return float(value)
 
 
@@ -986,6 +991,10 @@ def direct_api_call(agent, api_kwargs: dict):
     equal to the stale budget is the backstop when the abort finds nothing (#85252).
     Both surface a retryable ``TimeoutError`` for the outer retry loop."""
     _check_stale_giveup(agent)
+    if agent.api_mode == "codex_responses":
+        from agent.chat_completion_nonstream import _NonStreamRequest
+
+        return _NonStreamRequest(agent, api_kwargs).run_inline()
     agent._touch_activity("waiting for non-streaming API response")
     # Resolve the budget BEFORE the heartbeat starts: the resolver may raise
     # (fail-closed), and a leaked heartbeat thread would mask real stalls forever.
@@ -1156,6 +1165,14 @@ class _NonStreamWatchdogs:
     idle_timeout: float
     idle_requires_progress: bool
     progress_timeout: float = 0.0
+    total_timeout: float = float("inf")
+    progress_extends_stale: bool = False
+
+    def wall_timeout(self, last_progress_ts) -> float:
+        """Only substantive progress hands an implicit stale wall over to the total cap."""
+        if self.progress_extends_stale and last_progress_ts is not None:
+            return self.total_timeout
+        return min(self.stale_timeout, self.total_timeout)
 
 
 def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs:
@@ -1181,13 +1198,23 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     est_tokens = estimate_request_context_tokens(api_kwargs)
     effort_floor = _high_effort_silence_floor(agent) if codex else 0.0
     codex_floor = 0.0
-    # Local Responses servers keep their configured local stale/TTFB grace: the hosted
-    # large-context floor, hard ceiling and TTFB scale-up/cap below must not tighten it.
+    # Local Responses servers keep configured stale/TTFB grace; only an explicit
+    # hard ceiling or remaining run budget may tighten their absolute envelope.
     base_url = getattr(agent, "base_url", None)
     local = bool(base_url) and is_local_endpoint(base_url)
+    explicit_resolver = getattr(agent, "_stale_timeout_is_explicit", None)
+    explicit = callable(explicit_resolver) and explicit_resolver() is True
     if codex and not local:
         codex_floor = openai_codex_stale_timeout_floor(est_tokens)
-        stale_timeout = _bound_openai_codex_stale_timeout(stale_timeout, est_tokens)
+        if not explicit:
+            stale_timeout = cap_to_run_budget(agent, _bound_openai_codex_stale_timeout(stale_timeout, est_tokens))
+
+    total_timeout = float("inf")
+    if codex:
+        from agent.chat_completion_deadlines import responses_total_timeout
+
+        total_timeout = responses_total_timeout(agent, stale_timeout, explicit=explicit, local=local)
+        stale_timeout = min(stale_timeout, total_timeout)
 
     idle_default = max(effort_floor, next(
         (default for threshold, default in ((100_000, 180.0), (50_000, 120.0), (10_000, 60.0)) if est_tokens > threshold),
@@ -1243,7 +1270,8 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
         idle_timeout=idle_timeout, idle_requires_progress=progress_gated,
         # A lifecycle frame proves transport liveness, not model progress. Bound that phase
         # from the physical-attempt start; events cannot restart the grace period.
-        progress_timeout=CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS if progress_gated else 0.0)
+        progress_timeout=CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS if codex else 0.0,
+        total_timeout=total_timeout, progress_extends_stale=codex and not explicit)
 
 
 def _codex_silent_hang_hint(agent, api_kwargs: dict) -> Optional[str]:
@@ -2879,7 +2907,7 @@ class _StreamingCall(StreamingWaitMonitor):
         ``request_timeout_seconds`` wins over HERMES_API_TIMEOUT (1800s) and
         HERMES_STREAM_READ_TIMEOUT (120s); connect/pool cover the handshake, not
         inference: 30s, or capped at 60s when configured."""
-        cfg = get_provider_request_timeout(self.agent.provider, self.agent.model)
+        cfg = get_provider_request_timeout(_stream_timeout_provider_id(self.agent), self.agent.model)
         base = cfg if cfg is not None else env_float("HERMES_API_TIMEOUT", 1800.0)
         if cfg is not None:
             return base, cfg, min(base, 60.0)
@@ -3012,6 +3040,9 @@ class _StreamingCall(StreamingWaitMonitor):
         # ``delta.content`` stays empty, so an un-accumulated refusal looks like an empty
         # stream and burns the empty-response retries (the non-streaming fix is #46013).
         refusal_parts: list[str] = []
+        # Native Messages stop info relayed as chat chunks (MoA aggregator): ``stop_reason`` on the
+        # chunk, ``stop_details`` (refusal category/explanation) on the delta.
+        native_stop: dict[str, Any] = {}
         reasoning_details: list = []  # OpenRouter replay data (signatures, encrypted blocks)
         pending_text_parts: list[str] = []
         from agent.chat_completion_helpers_tool_calls import _ToolCallAccumulator
@@ -3095,6 +3126,9 @@ class _StreamingCall(StreamingWaitMonitor):
             self._mark_finish_seen(_diag, finish_reason)
             if hasattr(chunk, "usage") and chunk.usage:
                 usage_obj = chunk.usage
+            for _src, _key in ((chunk, "stop_reason"), (delta, "stop_details")):
+                if getattr(_src, _key, None) is not None:
+                    native_stop[_key] = getattr(_src, _key)
 
             reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             # Same ``model_extra`` fallback as the non-streaming path: a reasoning-only stream
@@ -3193,6 +3227,15 @@ class _StreamingCall(StreamingWaitMonitor):
             response_id=response_id, upstream_provider=upstream_provider, reasoning_details=reasoning_details,
             refusal_parts=refusal_parts)
         carriers.apply(response)
+        if native_stop:
+            # Read by the content-policy refusal handler: response.stop_reason and the
+            # normalized message's provider_data["stop_details"].
+            if "stop_reason" in native_stop:
+                response.stop_reason = native_stop["stop_reason"]
+            _choices = getattr(response, "choices", None)
+            _message = getattr(_choices[0], "message", None) if _choices else None
+            if _message is not None and "stop_details" in native_stop:
+                _message.stop_details = native_stop["stop_details"]
         if runaway:
             # Cut, not finished: the length path ends the turn on this mark instead of continuing.
             response._runaway_repetition = True

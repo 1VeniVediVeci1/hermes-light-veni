@@ -45,24 +45,27 @@ def codex_watchdog_deadline(*, stale_timeout: float, ttfb_enabled: bool, ttfb_ti
     last_event_ts: Optional[float], last_progress_ts: Optional[float],
     retry_started_ts: Optional[float], call_start: float, idle_enabled: bool,
     idle_timeout: float, idle_requires_progress: bool, elapsed: float,
-    progress_timeout: float = 0.0) -> Optional[tuple[str, float]]:
+    progress_timeout: float = 0.0, include_expired: bool = False) -> Optional[tuple[str, float]]:
     """Earliest enabled Codex watchdog as ``(label, seconds_until_it_fires)``; None when
     none applies (disabled/infinite, or its deadline already passed)."""
     deadlines: list[tuple[str, float]] = []
-    if math.isfinite(stale_timeout):
-        deadlines.append(("wall-clock stale", stale_timeout))
     attempt_offset = max(0.0, retry_started_ts - call_start) if retry_started_ts is not None else 0.0
     if last_event_ts is None:
         if ttfb_enabled and math.isfinite(ttfb_timeout):
             deadlines.append(("TTFB", attempt_offset + ttfb_timeout))
     elif progress_timeout > 0 and last_progress_ts is None:
         deadlines.append(("first progress", attempt_offset + progress_timeout))
-    elif (not idle_requires_progress or last_progress_ts is not None) and idle_enabled and math.isfinite(idle_timeout):
+    # The retry marker anchors first-progress; parsed events independently arm idle.
+    if (last_event_ts is not None
+            and (not idle_requires_progress or last_progress_ts is not None)
+            and idle_enabled and math.isfinite(idle_timeout)):
         deadlines.append(("stream idle", max(0.0, last_event_ts - call_start) + idle_timeout))
+    if math.isfinite(stale_timeout):
+        deadlines.append(("wall-clock stale", stale_timeout))
     if not deadlines:
         return None
     label, deadline = min(deadlines, key=lambda d: d[1])
-    if deadline <= elapsed:
+    if deadline <= elapsed and not include_expired:
         return None
     return label, deadline - elapsed
 

@@ -122,6 +122,16 @@ def _lift_common_custom_fields(entry: dict[str, Any], result: dict[str, Any], *,
     if api_mode:
         result["api_mode"] = api_mode
 
+    # Keep route-local controls on the matched entry. ``providers:`` resolution
+    # builds its runtime from this compact dict rather than the normalized list.
+    if isinstance(entry.get("proxy_url"), str):
+        result["proxy_url"] = entry["proxy_url"]
+    if isinstance(entry.get("proxy_fallback_to_direct"), bool):
+        result["proxy_fallback_to_direct"] = entry["proxy_fallback_to_direct"]
+    streaming = entry.get("stream", entry.get("streaming"))
+    if isinstance(streaming, bool):
+        result["streaming"] = streaming
+
     _lift_model_capabilities(entry, None, result)
 
 
@@ -636,6 +646,61 @@ def _apply_custom_provider_extras(custom_provider: dict[str, Any], target_model:
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = {**(result.get("request_overrides") or {}), **request_overrides}
+
+    # A task/CLI endpoint override is a different transport destination. Keep named
+    # timeout identity, but never borrow an unrelated endpoint's proxy/stream flags.
+    same_endpoint = (str(result.get("base_url") or "").strip().rstrip("/")
+                     == str(custom_provider.get("base_url") or "").strip().rstrip("/"))
+    if same_endpoint:
+        # Route-local transport controls must travel with the resolved runtime. An
+        # explicit empty proxy is meaningful: it disables inherited env proxies.
+        if isinstance(custom_provider.get("proxy_url"), str):
+            result["proxy_url"] = custom_provider["proxy_url"]
+        if isinstance(custom_provider.get("proxy_fallback_to_direct"), bool):
+            result["proxy_fallback_to_direct"] = custom_provider["proxy_fallback_to_direct"]
+        streaming = custom_provider.get("stream", custom_provider.get("streaming"))
+        if isinstance(streaming, bool):
+            result["streaming"] = streaming
+    timeout_provider = str(custom_provider.get("provider_key") or custom_provider.get("name") or "").strip()
+    if timeout_provider:
+        result["timeout_provider"] = timeout_provider
+
+
+def route_transport_controls(base_url: str, provider_id: str | None = None) -> dict[str, Any]:
+    """Return controls for an endpoint, preferring its named provider identity."""
+    target = str(base_url or "").strip().rstrip("/")
+    if not target:
+        return {}
+    identity = str(provider_id or "").strip().lower().removeprefix("custom:")
+    rp = _rp()
+    try:
+        entries = rp.get_compatible_custom_providers(rp.load_config())
+    except Exception:
+        return {}
+    candidates = [
+        entry for entry in entries or []
+        if isinstance(entry, dict) and str(entry.get("base_url") or "").strip().rstrip("/") == target
+    ]
+    if identity:
+        candidates = [
+            entry for entry in candidates
+            if identity in {
+                str(entry.get("provider_key") or "").strip().lower(),
+                str(entry.get("name") or "").strip().lower(),
+            }
+        ]
+    if len(candidates) != 1:
+        return {}
+    entry = candidates[0]
+    out: dict[str, Any] = {}
+    if isinstance(entry.get("proxy_url"), str):
+        out["proxy_url"] = entry["proxy_url"]
+    if isinstance(entry.get("proxy_fallback_to_direct"), bool):
+        out["proxy_fallback_to_direct"] = entry["proxy_fallback_to_direct"]
+    streaming = entry.get("stream", entry.get("streaming"))
+    if isinstance(streaming, bool):
+        out["streaming"] = streaming
+    return out
 
 
 class LocalRuntimeUnavailableError(ValueError):

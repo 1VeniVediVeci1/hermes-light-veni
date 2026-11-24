@@ -7,10 +7,6 @@ import { pathToFileURL } from 'node:url'
 import { test, vi } from 'vitest'
 
 import {
-  ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
-  clampDataUrlReadMaxMb,
-  DATA_URL_READ_DEFAULT_MAX_MB,
-  dataUrlReadMaxBytesFromMb,
   DEFAULT_FETCH_TIMEOUT_MS,
   enableBasicPasswordStoreEncryption,
   encryptDesktopSecret,
@@ -81,33 +77,15 @@ async function rejectsWithCode(promise, code: string) {
   })
 }
 
-test('clampDataUrlReadMaxMb defaults and bounds the attach size preference', () => {
-  assert.equal(clampDataUrlReadMaxMb(undefined), DATA_URL_READ_DEFAULT_MAX_MB)
-  assert.equal(clampDataUrlReadMaxMb(0), 1)
-  assert.equal(clampDataUrlReadMaxMb(256), 256)
-  assert.equal(clampDataUrlReadMaxMb(99999), 4096)
-  assert.equal(dataUrlReadMaxBytesFromMb(16), 16 * 1024 * 1024)
-})
-
-test('attachment data URL helper reads bytes above the preview default without changing that limit', async () => {
+test('data URL helper reads a file above the old 16 MiB preview default', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-desktop-large-attachment-'))
   const source = path.join(tempDir, 'large.bin')
-  const previewLimit = dataUrlReadMaxBytesFromMb(DATA_URL_READ_DEFAULT_MAX_MB)
-  const content = Buffer.alloc(previewLimit + 1024, 0x5a)
+  const content = Buffer.alloc(16 * 1024 * 1024 + 1, 0x5a)
 
   try {
     fs.writeFileSync(source, content)
 
-    await assert.rejects(
-      resolveReadableFileForIpc(source, {
-        maxBytes: previewLimit,
-        purpose: 'File preview'
-      }),
-      /file is too large/
-    )
-
     const dataUrl = await readFileDataUrlForIpc(source, {
-      maxBytes: ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
       mimeType: 'application/octet-stream',
       purpose: 'Attachment upload'
     })

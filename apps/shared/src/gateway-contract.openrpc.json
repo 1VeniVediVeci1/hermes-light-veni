@@ -14248,6 +14248,30 @@
             ],
             "default": null,
             "title": "Upstream Repo"
+          },
+          "configuration_updated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Configuration Updated"
+          },
+          "reload_required": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reload Required"
           }
         },
         "required": [
@@ -14406,7 +14430,8 @@
           "connect",
           "enable",
           "install",
-          "reconnect"
+          "reconnect",
+          "update"
         ],
         "title": "ConnectionTargetAction",
         "type": "string"
@@ -14523,6 +14548,7 @@
           "pending",
           "initiated",
           "connected",
+          "updated",
           "skipped",
           "failed",
           "expired",

@@ -211,6 +211,11 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
             config[key] = value
         else:
             config.pop(key, None)
+    if isinstance(nested := config.get("gateway_runtime"), dict) and nested.get("provider"):
+        # Resume reads the nested route first, and its model before the top-level pick: an older CLI or
+        # gateway route left in place would undo this pick on reopen, so it takes the live pair too.
+        config["gateway_runtime"] = {k: v for k, v in (
+            ("provider", provider), ("base_url", base_url), ("api_mode", attr("api_mode")), ("model", model)) if v}
     return config
 
 
@@ -659,6 +664,13 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     with _sessions_lock:
         session = _sessions.get(sid)
+    service_tier = service_tier_override if service_tier_override is not None else _load_service_tier()
+    request_overrides = dict(runtime.get("request_overrides") or {})
+    from agent.fast_mode import STATIC_TIERS
+    if service_tier in STATIC_TIERS:
+        from hermes_cli.models import resolve_fast_mode_overrides
+        request_overrides.update(resolve_fast_mode_overrides(
+            model, provider=runtime.get("provider"), base_url=runtime.get("base_url"), tier=service_tier) or {})
     agent = AIAgent(
         model=model, max_iterations=_cfg_max_turns(cfg), provider=runtime.get("provider"),
         requested_provider=runtime.get("requested_provider"),
@@ -668,7 +680,7 @@ def _make_agent(
         verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
         reasoning_config=(
             reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
-        service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
+        service_tier=service_tier,
         enabled_toolsets=onboarding_toolsets(_load_enabled_toolsets(platform),
                                              session_db if session_db is not None else _get_db(), session_id or key),
         disabled_toolsets=_load_disabled_toolsets(),
@@ -685,7 +697,7 @@ def _make_agent(
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
         # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.
-        request_overrides=runtime.get("request_overrides"),
+        request_overrides=request_overrides,
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)

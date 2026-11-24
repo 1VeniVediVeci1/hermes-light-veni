@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import threading
@@ -203,6 +204,16 @@ class _CatalogBackend:
             write_mcp_server_enabled(servers[name], True)
             save_config(config)
 
+    def prepare_update(self, name: str, updates: dict[str, Any]) -> Any:
+        from tools.connectors.mcp_update import prepare_update
+
+        return prepare_update(name, updates)
+
+    def commit_update(self, prepared: Any) -> None:
+        from tools.connectors.mcp_update import commit_update
+
+        commit_update(prepared)
+
 
 def _check_declared(name: str, entry: Any, env: dict[str, str]) -> None:
     """Configuring one MCP is not a general env-writing primitive: refuse the whole map before the
@@ -243,14 +254,16 @@ class _Work:
     done: threading.Event = field(default_factory=threading.Event)
     tools: list[str] = field(default_factory=list)
     error: str = ""
+    prepared_update: Any = None
 
 
 class _Runner:
     """The backend plus the work for one operation's targets."""
 
-    def __init__(self, action: str, backend: Any):
+    def __init__(self, action: str, backend: Any, updates: Optional[dict[str, Any]] = None):
         self.action = action
         self.backend = backend
+        self.updates = copy.deepcopy(updates or {})
         self.op_id: Optional[str] = None
         self.work: dict[str, _Work] = {}
         # The credentials the card approved, per target. Try again carries none (a failed row has
@@ -275,7 +288,11 @@ class _Runner:
             tools: list[str] = []
             error = ""
             try:
-                tools = [str(name) for name in (call() or [])]
+                result = call()
+                if self.action == "update":
+                    work.prepared_update = result
+                else:
+                    tools = [str(name) for name in (result or [])]
             except Exception as exc:
                 error = _detail(exc, self, target)
             if operation.settled:
@@ -403,10 +420,10 @@ def adopt_late_connections(agent: Any) -> list[str]:
 _RUNNERS: dict[str, _Runner] = {}
 
 
-def open_runner(action: str, backend: Any = None) -> _Runner:
+def open_runner(action: str, backend: Any = None, updates: Optional[dict[str, Any]] = None) -> _Runner:
     """The runner for one MCP operation. ``prepare`` binds it to the operation, so the card's
     answer and its Try again — both of which arrive on another thread — find the same work."""
-    return _Runner(action, backend or _default_backend())
+    return _Runner(action, backend or _default_backend(), updates)
 
 
 # Errors that carry no message reach the user as their class name; say what happened instead.
@@ -713,11 +730,65 @@ def _nothing(runner: _Runner, operation: ConnectionOperation, target: Target, en
     """Authorize needs no approval: the row's verb opens the link the flow already minted."""
 
 
-_PREPARE = {"authorize": _start_oauth, "install": _declare_env, "enable": _nothing}
-_APPROVE = {"authorize": _nothing, "install": _start_install, "enable": _do_enable}
-_RETRY = {"authorize": _start_oauth, "install": _start_install, "enable": _do_enable}
-_OBSERVE = {"authorize": _observe_oauth, "install": _observe_install, "enable": _observe_worker}
-_NO_CARD = {"authorize": _start_oauth, "install": _install_now, "enable": _do_enable}
+def _describe_update(runner: _Runner, operation: ConnectionOperation, target: Target, env: dict[str, str]) -> None:
+    target.instructions = (
+        "Update existing MCP launch: " + _detail(json.dumps(runner.updates), runner, target)
+        + ". Other settings are preserved. Existing clients keep running; reload separately when safe."
+    )
+
+
+def _start_update(runner: _Runner, operation: ConnectionOperation, target: Target, env: dict[str, str]) -> None:
+    if _move(operation, target, TargetState.initiated, _actor(target), detail=""):
+        runner.spawn(operation, target, lambda: runner.backend.prepare_update(target.name, runner.updates))
+
+
+def _finish_update(runner: _Runner, operation: ConnectionOperation, target: Target, prepared: Any) -> None:
+    detail = "Configuration updated; existing clients were not restarted."
+    if prepared.reload_required:
+        detail += " Reload this MCP server safely before claiming the new launch is active."
+    else:
+        detail += " The server remains disabled."
+    try:
+        operation.transition(
+            target.name, TargetState.updated, Actor.backend_watcher,
+            before_transition=lambda: runner.backend.commit_update(prepared), detail=detail,
+            configuration_updated=True, reload_required=prepared.reload_required,
+        )
+    except IllegalTransition:
+        # Skip, Continue or the deadline can win after the probe but before the commit lock.
+        if not target.resolved and not operation.settled and operation.remaining_seconds() > 0:
+            raise
+    except Exception as exc:
+        _fail(operation, target, _detail(exc, runner, target))
+
+
+def _observe_update(runner: _Runner, operation: ConnectionOperation, target: Target) -> None:
+    work = runner.work.get(target.name)
+    if work is None or not work.done.is_set():
+        return
+    runner.work.pop(target.name, None)
+    if work.error:
+        _fail(operation, target, work.error)
+    else:
+        _finish_update(runner, operation, target, work.prepared_update)
+
+
+def _update_now(runner: _Runner, operation: ConnectionOperation, target: Target, env: dict[str, str]) -> None:
+    if not _move(operation, target, TargetState.initiated, Actor.backend_watcher):
+        return
+    try:
+        prepared = runner.backend.prepare_update(target.name, runner.updates)
+    except Exception as exc:
+        _fail(operation, target, _detail(exc, runner, target))
+        return
+    _finish_update(runner, operation, target, prepared)
+
+
+_PREPARE = {"authorize": _start_oauth, "install": _declare_env, "enable": _nothing, "update": _describe_update}
+_APPROVE = {"authorize": _nothing, "install": _start_install, "enable": _do_enable, "update": _start_update}
+_RETRY = {"authorize": _start_oauth, "install": _start_install, "enable": _do_enable, "update": _start_update}
+_OBSERVE = {"authorize": _observe_oauth, "install": _observe_install, "enable": _observe_worker, "update": _observe_update}
+_NO_CARD = {"authorize": _start_oauth, "install": _install_now, "enable": _do_enable, "update": _update_now}
 
 
 # ---------------------------------------------------------------------------
@@ -824,11 +895,12 @@ def run_mcp_operation(
     session_id: Optional[str],
     tool_call_id: Optional[str] = None,
     backend: Any = None,
+    updates: Optional[dict[str, Any]] = None,
 ) -> str:
     error = validate_mcp_names(action, names)
     if error:
         return tool_error(error)
-    runner = open_runner(action, backend)
+    runner = open_runner(action, backend, updates)
     session_key = operation_session_key(session_id)
     # Every interactive surface that renders the card attaches this callback. Registry dispatch and
     # messaging sessions attach none, so they receive the link instead of opening an unanswerable op.

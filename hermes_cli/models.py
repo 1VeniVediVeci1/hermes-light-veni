@@ -1277,6 +1277,30 @@ def model_supports_ultrafast(model_id: Optional[str]) -> bool:
     return base in _OPENAI_ULTRAFAST_MODELS
 
 
+def _custom_responses_priority(model: str, provider: Optional[str], base_url: Optional[str]) -> bool:
+    """Bind the opt-in to the actual configured Responses route. The picker uses a bare key,
+    session policies can use custom:<key>, and a transport may only retain custom + URL."""
+    name = (provider or "").strip().lower()
+    if not name or (name == "custom" and not base_url) or (name != "custom" and name in _KNOWN_PROVIDER_NAMES):
+        return False
+    from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
+    from hermes_cli.providers import custom_provider_aliases
+
+    url = normalize_route_base_url(base_url)
+    matches = []
+    for entry in get_compatible_custom_providers(load_config_readonly()):
+        if url and url != normalize_route_base_url(entry.get("base_url")):
+            continue
+        if name != "custom" and name not in custom_provider_aliases(entry["name"], entry.get("provider_key", "")):
+            continue
+        if model in (entry.get("models") or {}):
+            matches.append(entry)
+    if len(matches) != 1 or matches[0].get("api_mode") != "codex_responses":
+        return False
+    settings = matches[0]["models"][model]
+    return isinstance(settings, dict) and settings.get("supports_fast_mode") is True
+
+
 def resolve_fast_mode_overrides(
     model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None,
     tier: Optional[str] = None,
@@ -1288,6 +1312,9 @@ def resolve_fast_mode_overrides(
     if not model_supports_fast_mode(model_id):
         return None
     if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
+        if (tier != "ultrafast" and _is_openai_fast_model(model_id)
+                and _custom_responses_priority(model_id or "", provider, base_url)):
+            return {"service_tier": "priority"}
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None

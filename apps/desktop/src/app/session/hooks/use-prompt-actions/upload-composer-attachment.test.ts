@@ -25,20 +25,14 @@ vi.mock('@/store/gateway', async importOriginal => ({
 
 describe('uploadComposerAttachment remote read failures', () => {
   afterEach(() => {
-    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
-  it('turns the raw 16MB IPC cap error into a friendly remote-gateway message', async () => {
-    // electron/hardening.ts rejects the readFileDataUrl IPC with this exact
-    // shape when a file exceeds the configured data-URL read cap.
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: {
-        readFileDataUrl: vi.fn(async () => {
-          throw new Error('File preview failed: file is too large (20971520 bytes; limit 16777216 bytes).')
-        })
-      }
+  it('turns a size-limit error from HTTP staging into a friendly remote-gateway message', async () => {
+    const api = vi.fn(async () => {
+      throw new Error('Attachment upload failed: file is too large (20971520 bytes; limit 16777216 bytes).')
     })
+    vi.stubGlobal('hermesDesktop', { api })
 
     const requestGateway = vi.fn(async () => ({}) as never)
 
@@ -49,14 +43,16 @@ describe('uploadComposerAttachment remote read failures', () => {
       )
     ).rejects.toThrow(/huge\.csv.*16 MB/)
 
-    // The cap is hit before any gateway round-trip.
+    expect(api).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST', path: '/api/chat/file-upload', upload: { path: '/abs/huge.csv', filename: 'huge.csv' }
+    }))
     expect(requestGateway).not.toHaveBeenCalled()
   })
 })
 
 describe('uploadComposerAttachment image cache contract', () => {
   afterEach(() => {
-    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('always re-reads the image from disk, even when a stale previewUrl is cached', async () => {
@@ -64,19 +60,13 @@ describe('uploadComposerAttachment image cache contract', () => {
     // populated `previewUrl` here does not mean it holds full-resolution
     // bytes (#93324) — the upload must never trust it and must always read
     // the on-disk file for the bytes the model receives.
-    const readFileDataUrl = vi.fn(async () => 'data:image/png;base64,ZnJvbS1kaXNr')
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl }
-    })
-
-    const requestGateway = vi.fn(async (method: string) => {
-      if (method === 'image.attach_bytes') {
-        return { attached: true, path: '/gw/images/shot.png' } as never
-      }
-
-      return {} as never
-    })
+    const diskDataUrl = 'data:image/png;base64,ZnJvbS1kaXNr'
+    const hostPath = '/gw/images/shot.png'
+    const readFileDataUrlForAttach = vi.fn(async () => diskDataUrl)
+    const readFileDataUrl = vi.fn()
+    const api = vi.fn(async () => ({ path: hostPath }))
+    vi.stubGlobal('hermesDesktop', { api, readFileDataUrl, readFileDataUrlForAttach })
+    const requestGateway = vi.fn(async () => ({ attached: true, path: hostPath }) as never)
 
     const uploaded = await uploadComposerAttachment(
       {
@@ -89,13 +79,15 @@ describe('uploadComposerAttachment image cache contract', () => {
       { remote: true, requestGateway, sessionId: RUNTIME_SESSION_ID }
     )
 
-    expect(readFileDataUrl).toHaveBeenCalledWith('/local/shot.png')
-    expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', {
-      content_base64: 'ZnJvbS1kaXNr',
-      filename: 'shot.png',
-      session_id: RUNTIME_SESSION_ID
+    expect(readFileDataUrlForAttach).toHaveBeenCalledExactlyOnceWith('/local/shot.png')
+    expect(readFileDataUrl).not.toHaveBeenCalled()
+    expect(api).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      method: 'POST', path: '/api/chat/image-upload', body: { data_url: diskDataUrl, filename: 'shot.png' }
+    }))
+    expect(requestGateway).toHaveBeenCalledExactlyOnceWith('image.attach', {
+      path: hostPath, session_id: RUNTIME_SESSION_ID
     })
-    expect(uploaded.path).toBe('/gw/images/shot.png')
+    expect(uploaded.path).toBe(hostPath)
   })
 })
 
@@ -139,7 +131,7 @@ describe('uploadComposerAttachment local cross-platform staging', () => {
       content_base64: 'aGVsbG8=',
       filename: 'photo.jpg',
       session_id: RUNTIME_SESSION_ID
-    })
+    }, 0)
     expect(requestGateway).not.toHaveBeenCalledWith('image.attach', expect.anything())
     expect(uploaded.path).toBe('/root/tmp/photo.jpg')
   })

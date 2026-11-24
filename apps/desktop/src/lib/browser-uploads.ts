@@ -4,11 +4,6 @@ import { type BrowserBootstrap, browserFetch, endpointUrl } from '@/lib/browser-
 
 const STAGED_UPLOAD_CACHE_LIMIT = 256
 
-/** The largest file the browser stages on the host, and the largest image it can send: sending reads
- *  a staged image back through /api/fs/read-data-url. Mirrors WEBAPP_ATTACHMENT_MAX_BYTES
- *  (hermes_constants.py), the cap on both. */
-export const BROWSER_UPLOAD_MAX_BYTES = 16 * 1024 * 1024
-
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.bmp': 'image/bmp',
   '.gif': 'image/gif',
@@ -126,15 +121,6 @@ async function stageBrowserFile(
   profile: null | string,
   onStaged: OnStaged
 ): Promise<string> {
-  // The server refuses a larger file anyway, with a 413 that doesn't name the limit: say it here.
-  // The reason leaves out the name, which a drop warning adds: a long name would push the reason
-  // past readableError's length cap and lose the limit.
-  if (file.size > BROWSER_UPLOAD_MAX_BYTES) {
-    throw new Error(
-      `The file is larger than ${BROWSER_UPLOAD_MAX_BYTES / (1024 * 1024)} MiB, the largest file the browser can attach.`
-    )
-  }
-
   const form = new FormData()
   form.append('file', file, file.name || 'attachment')
 
@@ -252,14 +238,6 @@ export function createBrowserUploadsBridge({
       throw new Error("SVG and ICO images can't be attached in the browser. Attach a PNG, JPEG, GIF, WebP or BMP instead.")
     }
 
-    // /api/chat/image-upload stores images up to 25 MiB, but the send reads the staged image back
-    // with the 16 MiB file-read cap: refuse a larger one here, before it shows as attached.
-    if (imageMime && bytes.byteLength > BROWSER_UPLOAD_MAX_BYTES) {
-      throw new Error(
-        `The image is larger than ${BROWSER_UPLOAD_MAX_BYTES / (1024 * 1024)} MiB, the largest image the browser can send.`
-      )
-    }
-
     if (imageMime) {
       // Route by the profile active at the paste, not after the encode.
       const profile = currentProfile()
@@ -272,7 +250,9 @@ export function createBrowserUploadsBridge({
         },
         method: 'POST',
         path: '/api/chat/image-upload',
-        profile
+        profile,
+        // No deadline: a large paste over a slow link must not be cut off (local change).
+        timeoutMs: 0
       })
 
       return uploaded.path || ''

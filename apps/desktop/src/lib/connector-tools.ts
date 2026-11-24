@@ -4,10 +4,10 @@ import type { ToolLabel } from '@hermes/shared'
 
 export interface McpTarget {
   name: string
-  action: 'authorize' | 'enable' | 'install'
+  action: 'authorize' | 'enable' | 'install' | 'update'
 }
 
-const MCP_ACTIONS: readonly McpTarget['action'][] = ['install', 'enable', 'authorize']
+const MCP_ACTIONS: readonly McpTarget['action'][] = ['install', 'enable', 'authorize', 'update']
 
 /** Reads args so live and settled rows classify alike. */
 export function mcpTargets(toolName: string, args: ToolCallMessagePart['result']): McpTarget[] {

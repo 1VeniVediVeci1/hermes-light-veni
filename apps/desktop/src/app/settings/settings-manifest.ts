@@ -147,13 +147,6 @@ export const SETTINGS_MANIFEST = {
       copy: t => ({ label: t.settings.appearance.pet.chooseTitle, description: t.settings.appearance.pet.chooseDesc })
     }
   },
-  chat: {
-    attachmentSize: {
-      subpage: 'attachments',
-      keywords: ['attachment', 'image', 'preview', 'upload', 'file size', 'limit', 'MB'],
-      copy: t => ({ label: t.settings.config.attachmentSizeTitle, description: t.settings.config.attachmentSizeDesc })
-    }
-  },
   advanced: {
     keepAwake: {
       subpage: 'desktop',
@@ -281,7 +274,7 @@ export const SETTINGS_MANIFEST = {
 export type ManifestViewKey = keyof typeof SETTINGS_MANIFEST
 
 /** Manifest keys that are config sections route as `config:<key>`; the rest are views of their own. */
-const CONFIG_SECTION_KEYS: readonly ManifestViewKey[] = ['appearance', 'chat', 'advanced']
+const CONFIG_SECTION_KEYS: readonly ManifestViewKey[] = ['appearance', 'advanced']
 
 export const manifestView = (key: ManifestViewKey): SettingsView =>
   CONFIG_SECTION_KEYS.includes(key) ? `config:${key}` : (key as SettingsView)

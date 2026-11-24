@@ -21,6 +21,12 @@ class FakeEnv:
         self.calls.append((command, kwargs))
         return self.results.pop(0)
 
+    def _run_ssh(self, command, *, timeout):
+        from subprocess import CompletedProcess
+
+        result = self.execute(command, timeout=timeout)
+        return CompletedProcess([], result["returncode"], result["output"])
+
 
 def _entry(name: str, path: str, kind: str) -> str:
     return "\t".join(

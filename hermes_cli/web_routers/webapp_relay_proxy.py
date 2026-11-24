@@ -57,8 +57,6 @@ _KEEP_RESPONSE = frozenset({
 _RESPONSE_POLICY = {"Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff",
                     "Cache-Control": "no-store"}
 _METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-#: The most a relayed frame may carry: what the gateway's own socket accepts (file.attach data URLs).
-_MAX_FRAME = 384 * 1024 * 1024
 #: What a URL parser reads as the "." and ".." path segments (WHATWG URL, any letter case).
 _DOT = frozenset({".", "%2e"})
 _DOT_DOT = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
@@ -166,10 +164,13 @@ async def _send(request: Request, row: reach.Target, method: str, target: str, h
     """Send the request to *row*; a sign-in the remote answers 401 to earns one forced refresh and
     one resend (Desktop's ``oauth-rest-request.ts`` rule), when the request has no body to replay."""
     client = relay_client(request.app.state)
+    upload = target.partition("?")[0] in {"/api/chat/file-upload", "/api/chat/image-upload"}
 
     async def once(to: reach.Target) -> httpx.Response:
         upstream = client.build_request(method, f"{to.base_url}{target}", headers={**headers, **to.headers},
                                         content=request.stream() if has_body else None)
+        if upload:
+            upstream.extensions["timeout"]["write"] = None
         return await client.send(upstream, stream=True)
 
     response = await once(row)
@@ -324,8 +325,8 @@ async def relay_ws(ws: WebSocket, connection_id: str, path: str) -> None:
     extra = {k: v for k, v in row.headers.items() if k.lower() not in {"x-hermes-session-token", "authorization"}}
     try:
         upstream = await connect(url, subprotocols=offered or None, additional_headers=extra or None,
-                                 origin=Origin(f"{parts.scheme}://{parts.netloc}"), max_size=_MAX_FRAME,
-                                 open_timeout=15, compression=None)
+                                 origin=Origin(f"{parts.scheme}://{parts.netloc}"), max_size=None,
+                                 open_timeout=15, ping_timeout=None, compression=None)
     except (OSError, TimeoutError, WebSocketException) as exc:  # refused there, or unreachable
         _log.info("Gateway relay socket to %s%s refused: %s", row.base_url, path, type(exc).__name__)
         await ws.close(code=4403)

@@ -8,6 +8,7 @@ import os
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES
+from hermes_cli.attachment_limits import attachment_size_cap
 from hermes_cli.staged_uploads import (
     publish_staged_upload,
     resolve_upload_home,
@@ -34,8 +35,9 @@ async def upload_chat_file(
         # FastAPI has already spooled the complete upload outside the profile.
         # Check the actual bytes, then publish that spool into the resolved home.
         total = await asyncio.to_thread(file.file.seek, 0, os.SEEK_END)
-        if total > _MAX_UPLOAD_BYTES:
-            cap_mib = _MAX_UPLOAD_BYTES // (1024 * 1024)
+        cap = attachment_size_cap(_MAX_UPLOAD_BYTES)
+        if cap is not None and total > cap:
+            cap_mib = cap // (1024 * 1024)
             raise HTTPException(
                 status_code=413,
                 detail=f"File is too large; cap is {cap_mib} MiB",

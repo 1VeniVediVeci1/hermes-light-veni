@@ -256,7 +256,13 @@ export const CONNECTOR_CARD_PHASES = {
   initiated: { mark: 'waiting', resolved: false, settled: notConnected, verb: 'open' },
   not_connected: { mark: 'idle', resolved: false, settled: notConnected, verb: 'none' },
   pending: { mark: 'idle', resolved: false, settled: notConnected, verb: 'open' },
-  skipped: { mark: 'idle', resolved: true, settled: skipped, verb: 'none' }
+  skipped: { mark: 'idle', resolved: true, settled: skipped, verb: 'none' },
+  updated: {
+    mark: 'connected',
+    resolved: true,
+    settled: (copy: ConnectorCopy): SettledWord => ({ meta: copy.updated, tone: 'ok' }),
+    verb: 'none'
+  }
 } satisfies Record<ConnectionTargetState, ConnectorCardPhase>
 
 // A disabled verb (a working row, a waiting row with no link yet) refuses focus, and the keyboard

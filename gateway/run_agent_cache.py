@@ -118,6 +118,7 @@ class GatewayAgentCacheMixin:
         threads trade prompt-cache warmth for correct memory attribution.
         """
         import hashlib, json as _j
+        from hermes_cli.route_controls import route_policy_fingerprint
         # Fingerprint the FULL credential, not a short prefix: OAuth/JWT-style tokens often share a
         # common prefix (e.g. "eyJhbGci"), so a prefix would give false cache hits across auth switches.
         _api_key = str(runtime.get("api_key", "") or "")
@@ -127,6 +128,10 @@ class GatewayAgentCacheMixin:
                 hashlib.sha256(_api_key.encode()).hexdigest() if _api_key else "",
                 runtime.get("base_url", ""), runtime.get("provider", ""),
                 runtime.get("requested_provider", ""), runtime.get("api_mode", ""),
+                runtime.get("provider_streaming"), runtime.get("timeout_provider"),
+                route_policy_fingerprint(
+                    runtime.get("timeout_provider") or runtime.get("requested_provider") or runtime.get("provider"),
+                    runtime.get("base_url", ""), model),
                 sorted((runtime.get("capabilities") or {}).items()),
                 sorted(enabled_toolsets) if enabled_toolsets else [],
                 # reasoning_config excluded — set per-message on the cached agent; no prompt/tool effect.
@@ -172,7 +177,8 @@ class GatewayAgentCacheMixin:
             # retries the resolution for that provider on each turn (default route + notice meanwhile).
             try:
                 runtime = _resolve_runtime_agent_kwargs_for_provider(provider, target_model=persisted.get("model") or None)
-                for k in ("api_key", "api_mode", "credential_pool", "requested_provider", "max_tokens"):
+                for k in ("api_key", "api_mode", "credential_pool", "requested_provider", "max_tokens",
+                          "provider_streaming", "timeout_provider"):
                     override[k] = runtime.get(k)
                 override["request_overrides"] = dict(runtime.get("request_overrides") or {})
                 override["capabilities"] = dict(runtime.get("capabilities") or {})
@@ -208,6 +214,8 @@ class GatewayAgentCacheMixin:
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
+        from hermes_cli.route_controls import live_agent_controls
+        runtime_kwargs.update(live_agent_controls({**runtime_kwargs, **override}))
         # request_overrides reflects the switched-to provider; apply whenever the override recorded
         # it (even as None) so switching to a provider without configured overrides clears a stale
         # value left by the default provider's runtime resolution.

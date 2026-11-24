@@ -2298,6 +2298,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
 def _runtime_agent_kwargs(runtime: dict) -> dict:
     """AIAgent constructor kwargs shared by every runtime-provider resolution.
     ``request_overrides`` passes through as resolved so the provider's request body reaches each turn."""
+    from hermes_cli.route_controls import runtime_agent_controls
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
@@ -2307,7 +2308,8 @@ def _runtime_agent_kwargs(runtime: dict) -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
-        "request_overrides": runtime.get("request_overrides")}
+        "request_overrides": runtime.get("request_overrides"),
+        **runtime_agent_controls(runtime)}
 
 
 @dataclasses.dataclass(frozen=True)

@@ -120,18 +120,25 @@ class ConnectionOperation:
     def transition(
         self, name: str, to: TargetState, actor: Actor, *, detail: Optional[str] = None,
         connect_url: Optional[str] = None, connection_id: Optional[str] = None, attempt: Optional[str] = None,
+        before_transition: Optional[Callable[[], None]] = None,
         **extra: Any,
     ) -> Optional[dict[str, Any]]:
         """Move one target; the contract decides whether ``actor`` may. Returns the change, or None
-        when the target is already in ``to``. Allowed after settlement: the frozen result stays."""
+        when the target is already in ``to``. Observations may arrive after settlement, but an
+        optional commit callback is forbidden once settled/expired and runs under the state lock."""
         target = self.target(name)
         if target is None:
             raise IllegalTransition(f"unknown target {name!r}")
         with self._lock:
+            if before_transition is not None and (self.settled or self.remaining_seconds() <= 0):
+                raise IllegalTransition("operation settled or expired before configuration commit")
             if target.state == to:
                 return None
             if allowed(target.kind, target.state, to) != actor:
                 raise IllegalTransition(f"{target.kind} {name}: {target.state.value} -> {to.value} by {actor.value}")
+            if before_transition is not None:
+                # Serialize a bounded local config commit with user skip/settle. Probes run outside.
+                before_transition()
             change = {"target": name, "from": target.state.value, "to": to.value, "actor": actor.value}
             target.state = to
             if detail is not None:

@@ -870,6 +870,9 @@ def _apply_openai_header_policy(agent, client_kwargs: dict[str, Any]) -> None:
             client_kwargs["default_headers"] = headers
     # model.default_headers override provider/SDK defaults (WAFs rejecting SDK headers).
     agent._apply_user_default_headers()
+    from hermes_cli.route_controls import openai_transport_controls
+    client_kwargs.update(openai_transport_controls(
+        client_kwargs.get("base_url", ""), getattr(agent, "_timeout_provider", None)))
     try:
         from hermes_cli.config import (
             apply_custom_provider_extra_headers_to_client_kwargs,
@@ -930,7 +933,7 @@ def _build_client(agent, api_key, base_url, fallback_model):
     # responses.stream()). One provider/model timeout up front so every path applies it.
     agent._anthropic_client = None
     agent._is_anthropic_oauth = False
-    _provider_timeout = get_provider_request_timeout(agent.provider, agent.model)
+    _provider_timeout = get_provider_request_timeout(agent._timeout_provider_id(), agent.model)
     if agent.api_mode == "anthropic_messages":
         _init_anthropic_client(agent, api_key, base_url, _provider_timeout)
     elif agent.provider == "moa":
@@ -1113,6 +1116,37 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
     agent._todo_store = TodoStore()
 
 
+def _apply_streaming_config(agent, model_section):
+    """Apply global streaming defaults, then the active route's explicit override."""
+    configured = str(model_section.get("streaming", "true")).strip().lower()
+    agent._disable_streaming = configured in {"false", "0", "no", "off"}
+    agent._global_streaming_disabled = agent._disable_streaming
+    provider_streaming = getattr(agent, "_provider_streaming", None)
+    if not isinstance(provider_streaming, bool):
+        try:
+            from hermes_cli.runtime_provider_custom import route_transport_controls
+            provider_streaming = route_transport_controls(
+                agent.base_url, getattr(agent, "_timeout_provider", None)
+            ).get("streaming")
+        except Exception:
+            logger.debug("custom-provider streaming resolution skipped", exc_info=True)
+    if isinstance(provider_streaming, bool):
+        agent._disable_streaming = not provider_streaming
+    # A route change resets to this seed (route_verdicts), so it carries the route's override.
+    agent._disable_streaming_seed = agent._disable_streaming
+    if not agent._disable_streaming and configured not in {"true", "1", "yes", "on"}:
+        logger.warning(
+            "Invalid model.streaming=%r; expected a boolean. Using streaming (default).",
+            model_section.get("streaming"),
+        )
+
+
+def refresh_route_streaming(agent) -> None:
+    """Re-resolve the route's streaming override over the session's configured global default."""
+    model_section = {"streaming": "false" if getattr(agent, "_global_streaming_disabled", False) else "true"}
+    _apply_streaming_config(agent, model_section)
+
+
 def _apply_display_config(agent, _agent_cfg, platform):
     # show_commentary: Codex phase=commentary → interim path (true) or reasoning channel.
     agent.show_commentary = bool(_cfg_dict(_agent_cfg, "display").get("show_commentary", True))
@@ -1130,15 +1164,8 @@ def _apply_display_config(agent, _agent_cfg, platform):
             _model_section.get("lmstudio_load_mode"),
         )
 
-    # model.streaming=false seeds _disable_streaming (the loop's runtime fallback) for backends with broken
-    # streaming tool calls; a route change resets to this seed (route_verdicts). Orthogonal to display.streaming.
-    _streaming = str(_model_section.get("streaming", "true")).strip().lower()
-    agent._disable_streaming = agent._disable_streaming_seed = _streaming in {"false", "0", "no", "off"}
-    if not agent._disable_streaming and _streaming not in {"true", "1", "yes", "on"}:
-        logger.warning(
-            "Invalid model.streaming=%r; expected a boolean. Using streaming (default).",
-            _model_section.get("streaming"),
-        )
+    # Seed the session fallback from global config and the active named route.
+    _apply_streaming_config(agent, _model_section)
     agent._stream_5xx_probe_ts = None  # monotonic time of the last streaming-5xx unmask probe
 
     try:
@@ -2078,7 +2105,9 @@ def init_agent(
     event_callback: Optional[Callable[[str, dict], None]] = None,
     reaction_callback: Optional[Callable[[str], None]] = None, max_tokens: int | None = None,
     reasoning_config: dict[str, Any] | None = None, service_tier: str | None = None,
-    request_overrides: dict[str, Any] | None = None, prefill_messages: list[dict[str, Any]] | None = None,
+    request_overrides: dict[str, Any] | None = None, provider_streaming: bool | None = None,
+    timeout_provider: str | None = None,
+    prefill_messages: list[dict[str, Any]] | None = None,
     platform: str | None = None, user_id: str | None = None, user_id_alt: str | None = None, user_name: str | None = None,
     chat_id: str | None = None, chat_name: str | None = None, chat_type: str | None = None, thread_id: str | None = None,
     gateway_session_key: str | None = None, skip_context_files: bool = False,
@@ -2102,6 +2131,8 @@ def init_agent(
     _install_safe_stdio()
 
     _params = locals()
+    agent._provider_streaming = provider_streaming
+    agent._timeout_provider = timeout_provider
     for _name in _PASSTHROUGH_PARAMS:
         setattr(agent, _name, _params[_name])
     for _name in _GATEWAY_IDENTITY_PARAMS:
@@ -2130,6 +2161,9 @@ def init_agent(
         if isinstance(requested_provider, str) and requested_provider.strip()
         else agent.provider
     )
+    agent._timeout_provider = str(
+        agent._timeout_provider or agent.requested_provider or agent.provider or ""
+    ).strip().lower()
     agent.capabilities = {
         key: value for key, value in (capabilities or {}).items()
         if isinstance(key, str) and isinstance(value, bool)

@@ -65,7 +65,7 @@ def _valid_credential_pair(api_key: Any, base_url: Any) -> bool:
 
 def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb_base_url: str, fb_api_mode: str) -> None:
     """Install the fallback client(s) in place, honoring request_timeout_seconds (None = SDK default)."""
-    timeout = get_provider_request_timeout(fb_provider, fb_model)
+    timeout = get_provider_request_timeout(getattr(agent, "_timeout_provider", fb_provider), fb_model)
     if fb_provider == "bedrock" and fb_api_mode in ("anthropic_messages", "bedrock_converse"):
         # Non-Mantle Bedrock: boto3-chain auth, no OpenAI/Anthropic SDK client to carry over.
         from agent.bedrock_adapter import bind_bedrock_runtime
@@ -184,10 +184,13 @@ class ClientLifecycleMixin:
         return False
 
     @staticmethod
-    def _build_keepalive_http_client(base_url: str = "", *, verify: Any = True) -> Any:
+    def _build_keepalive_http_client(base_url: str = "", *, verify: Any = True,
+                                     proxy_url: str | None = None,
+                                     proxy_fallback_to_direct: bool = False) -> Any:
         """Build the shared OpenAI httpx client used by main and aux paths."""
         from agent.process_bootstrap import build_keepalive_http_client
-        return build_keepalive_http_client(base_url, verify=verify)
+        return build_keepalive_http_client(base_url, verify=verify, proxy_url=proxy_url,
+                                           proxy_fallback_to_direct=proxy_fallback_to_direct)
 
     _create_openai_client = _forward("agent.agent_runtime_helpers", "create_openai_client")
     _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers", "force_close_tcp_sockets")
@@ -495,13 +498,13 @@ class ClientLifecycleMixin:
                     get_provider_request_timeout(self.provider, self.model))
         return (
             "direct", self._anthropic_api_key, getattr(self, "_anthropic_base_url", None),
-            get_provider_request_timeout(self.provider, self.model), bool(getattr(self, "_oauth_1m_beta_disabled", False)),
+            get_provider_request_timeout(self._timeout_provider_id(), self.model), bool(getattr(self, "_oauth_1m_beta_disabled", False)),
         )
 
     def _build_direct_anthropic_client(self, token: str, base_url: Any) -> Any:
         """Native Anthropic client for ``token``/``base_url`` with the provider/model request timeout."""
         from agent.anthropic_adapter import build_anthropic_client
-        return build_anthropic_client(token, base_url, timeout=get_provider_request_timeout(self.provider, self.model))
+        return build_anthropic_client(token, base_url, timeout=get_provider_request_timeout(self._timeout_provider_id(), self.model))
 
     def _anthropic_oauth_flag(self, token: str) -> bool:
         """OAuth flag only on native Anthropic routes; third-party Anthropic-protocol endpoints must not trip OAuth paths."""
@@ -899,6 +902,12 @@ class ClientLifecycleMixin:
 
     # ------------------------------------------------------------------ route-derived client config
     def _apply_client_headers_for_base_url(self, base_url: str, *, apply_user_headers: bool = True) -> None:
+        # Controls are route-local. Drop a previous route's values before resolving
+        # the current endpoint so credential rotation cannot retain a stale proxy.
+        self._client_kwargs.pop("proxy_url", None)
+        self._client_kwargs.pop("proxy_fallback_to_direct", None)
+        from hermes_cli.route_controls import openai_transport_controls
+        self._client_kwargs.update(openai_transport_controls(base_url, getattr(self, "_timeout_provider", None)))
         for host, build in _ROUTE_DEFAULT_HEADERS:
             if base_url_host_matches(base_url, host):
                 self._client_kwargs["default_headers"] = build(self, base_url)

@@ -1057,8 +1057,9 @@ def _(rid, params: dict) -> dict:
     raw_b64 = str(params.get("content_base64") or params.get("data") or "").strip()
     if not raw_b64:
         return _err(rid, 4015, "content_base64 required")
+    from hermes_cli.attachment_limits import attachment_size_cap
     img_bytes, err = _decode_attach_payload(
-        rid, raw_b64, mime_prefix="image/", max_bytes=_ATTACH_BYTES_MAX_BYTES,
+        rid, raw_b64, mime_prefix="image/", max_bytes=attachment_size_cap(_ATTACH_BYTES_MAX_BYTES),
         label="image", empty_msg="image is empty")
     if err is not None:
         return err
@@ -1103,17 +1104,16 @@ def _(rid, params: dict) -> dict:
         if err is not None:
             return err
         argv = [
-            "pdftoppm", "-png", "-r", "150", "-f", str(first_page), "-l", str(last_page),
-            str(pdf_path), str(td_path / "page")]
+            "pdftoppm", "-png", "-r", "150", "-f", str(first_page)]
+        if last_page is not None:
+            argv.extend(["-l", str(last_page)])
+        argv.extend([str(pdf_path), str(td_path / "page")])
         from hermes_cli._subprocess_compat import windows_hide_flags
-        try:
-            # UTF-8 + lossy decode: non-UTF-8 child output must not crash the gateway
-            # thread on locale-mismatched Windows.
-            res = subprocess.run(
-                argv, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
-                encoding="utf-8", errors="replace", creationflags=windows_hide_flags(), check=False)
-        except subprocess.TimeoutExpired:
-            return _err(rid, 5028, "pdftoppm timed out (>120s)")
+        # UTF-8 + lossy decode: non-UTF-8 child output must not crash the gateway
+        # thread on locale-mismatched Windows.
+        res = subprocess.run(
+            argv, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            encoding="utf-8", errors="replace", creationflags=windows_hide_flags(), check=False)
         if res.returncode != 0:
             tail = (res.stderr or res.stdout or "").strip().splitlines()[-3:]
             return _err(rid, 5028, "pdftoppm failed: " + " | ".join(tail))
@@ -1381,7 +1381,7 @@ def _pdf_attach_source(rid, params, td_path, raw_path, raw_b64):
     """Materialize the PDF to render: ``(pdf_path, display_name, err)``."""
     if raw_b64:
         pdf_bytes, err = _decode_attach_payload(
-            rid, raw_b64, mime_prefix="application/pdf", max_bytes=_PDF_ATTACH_MAX_BYTES,
+            rid, raw_b64, mime_prefix="application/pdf", max_bytes=None,
             label="PDF", empty_msg="decoded PDF is empty")
         if err is not None:
             return None, None, err
@@ -1399,14 +1399,11 @@ def _pdf_attach_source(rid, params, td_path, raw_path, raw_b64):
         return None, None, _err(rid, 4016, f"PDF not found: {raw_path}")
     if pdf.suffix.lower() != ".pdf":
         return None, None, _err(rid, 4016, f"not a PDF: {pdf.name}")
-    if pdf.stat().st_size > _PDF_ATTACH_MAX_BYTES:
-        mb = _PDF_ATTACH_MAX_BYTES // (1024 * 1024)
-        return None, None, _err(rid, 4018, f"PDF too large; cap is {mb} MB")
     return pdf, pdf.name, None
 
 
 def _pdf_page_range(rid, params):
-    """Validate first/last page against the per-call cap: ``(first, last, err)``."""
+    """Validate first/last page: ``(first, last, err)``."""
     try:
         first_page = int(params.get("first_page") or 1)
         last_page = None if params.get("last_page") is None else int(params.get("last_page"))
@@ -1414,13 +1411,8 @@ def _pdf_page_range(rid, params):
         return None, None, _err(rid, 4015, "first_page/last_page must be integers")
     if first_page < 1:
         return None, None, _err(rid, 4015, "first_page must be >= 1")
-    if last_page is None:
-        last_page = first_page + _PDF_ATTACH_MAX_PAGES - 1
-    if last_page < first_page:
+    if last_page is not None and last_page < first_page:
         return None, None, _err(rid, 4015, "last_page must be >= first_page")
-    if last_page - first_page + 1 > _PDF_ATTACH_MAX_PAGES:
-        return None, None, _err(
-            rid, 4019, f"page range exceeds cap of {_PDF_ATTACH_MAX_PAGES} pages per attach call")
     return first_page, last_page, None
 
 

@@ -1183,9 +1183,21 @@ def _commit_tool_result(
         except Exception as callback_error:
             logging.debug("Tool result metadata callback error: %s", callback_error)
     stamp_data_use(tool_message, sorted(data_use))
-    messages.append(tool_message)
-    if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
+    from agent.process_completions import attach_process_completions, refund_process_completions
+    receipt = attach_process_completions(agent, tool_message, owner_task_id=effective_task_id)
+    try:
+        messages.append(tool_message)
+        flushed = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
+    except BaseException:
+        refund_process_completions(tool_message, receipt)
+        raise
+    if not flushed:
+        refund_process_completions(tool_message, receipt)
         return None
+    if receipt is not None:
+        from tools.process_registry import process_registry
+        token, events, _original_content = receipt
+        process_registry.commit_completion_events(events, claim_id=token)
 
     if not blocked:
         # ``tool.completed`` projects AFTER the canonical append + flush so resume can

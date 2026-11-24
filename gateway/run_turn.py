@@ -231,6 +231,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                     **reply_expected_metadata(event.reply_expected), **diagnostic_metadata(event)},
                 message_type=event.message_type,
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
+                process_completion_batch=getattr(event, "_process_completion_batch", None) if event.internal else None,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
@@ -1774,6 +1775,8 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                     reply_expected=next_reply_expected, persist_user_display_metadata={
                         **display_metadata_for_event(pending_event),
                         **reply_expected_metadata(next_reply_expected), **diagnostic_metadata(pending_event)} or None,
+                    process_completion_batch=getattr(pending_event, "_process_completion_batch", None)
+                    if getattr(pending_event, "internal", False) else None,
                 )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -1834,6 +1837,10 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
 
         tracking_task.cancel()
         if session_key:
+            # Capture the live route before releasing the agent.  The inbound
+            # owner consumes this exact generation once for the goal judge.
+            from gateway.run_goals import _remember_goal_main_runtime_snapshot
+            _remember_goal_main_runtime_snapshot(self, session_key, turn_ctx.run_generation, turn_ctx.agent_holder[0])
             # Release the slot only if this run's generation still owns it (/stop or /new may have
             # installed its own state).
             self._release_running_agent_state(session_key, run_generation=turn_ctx.run_generation)
@@ -2052,10 +2059,15 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         reply_expected: Optional[bool] = None,
         scheduled_heartbeat: bool = False,
         title_user_message: Optional[str] = None,
+        process_completion_batch: Any = None,
     ) -> dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
         Keys: "final_response", "messages", "api_calls", "completed"."""
+        if process_completion_batch is not None:
+            from tools.process_registry import process_registry
+            if not process_completion_batch.unread(process_registry):
+                return {"final_response": "[SILENT]", "messages": history, "completed": True, "api_calls": 0}
         if self._get_proxy_url():
             result = await self._run_agent_via_proxy(
                 message=message, context_prompt=context_prompt, history=history, source=source,
@@ -2094,6 +2106,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             persist_user_display_kind=persist_user_display_kind,
             reply_expected=reply_expected,
             persist_user_display_metadata=persist_user_display_metadata, scheduled_heartbeat=scheduled_heartbeat,
+            process_completion_batch=process_completion_batch,
             voice_turn=str(getattr(message_type, "value", message_type) or "").lower() == "voice",
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(

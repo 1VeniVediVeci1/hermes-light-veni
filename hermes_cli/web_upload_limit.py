@@ -7,6 +7,7 @@ from starlette.formparsers import MultiPartException
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from hermes_cli.attachment_limits import attachment_size_cap
 from hermes_cli.web_server_surface import policy
 from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES
 
@@ -20,9 +21,28 @@ CHAT_FILE_BODY_MAX_BYTES = WEBAPP_ATTACHMENT_MAX_BYTES + 64 * 1024
 CHAT_IMAGE_MAX_BYTES = 25 * 1024 * 1024
 CHAT_IMAGE_BODY_MAX_BYTES = 4 * -(-CHAT_IMAGE_MAX_BYTES // 3) + 64 * 1024
 
+_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
+
+def chat_file_body_max_bytes() -> int | None:
+    """Body cap for /api/chat/file-upload under ``attachments.max_bytes``; None when uncapped."""
+    cap = attachment_size_cap(WEBAPP_ATTACHMENT_MAX_BYTES)
+    return None if cap is None else cap + _MULTIPART_OVERHEAD_BYTES
+
+
+def chat_image_max_bytes() -> int | None:
+    """Largest decoded image /api/chat/image-upload stores; None when uncapped."""
+    return attachment_size_cap(CHAT_IMAGE_MAX_BYTES)
+
+
+def chat_image_body_max_bytes() -> int | None:
+    cap = chat_image_max_bytes()
+    return None if cap is None else 4 * -(-cap // 3) + _MULTIPART_OVERHEAD_BYTES
+
+
 _BODY_MAX_BYTES = {
-    "/api/chat/file-upload": CHAT_FILE_BODY_MAX_BYTES,
-    "/api/chat/image-upload": CHAT_IMAGE_BODY_MAX_BYTES,
+    "/api/chat/file-upload": chat_file_body_max_bytes,
+    "/api/chat/image-upload": chat_image_body_max_bytes,
 }
 
 
@@ -40,9 +60,13 @@ class ChatFileUploadLimitMiddleware:
         root = scope.get("root_path", "")
         if root and path.startswith(root + "/"):
             path = path[len(root) :]
-        body_max = _BODY_MAX_BYTES.get(path)
-        if (scope["type"] != "http" or scope["method"] != "POST" or body_max is None
+        body_cap = _BODY_MAX_BYTES.get(path)
+        if (scope["type"] != "http" or scope["method"] != "POST" or body_cap is None
                 or not policy(getattr(scope.get("app"), "state", None)).browser_files):
+            await self.app(scope, receive, send)
+            return
+        body_max = body_cap()
+        if body_max is None:
             await self.app(scope, receive, send)
             return
 

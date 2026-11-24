@@ -34,6 +34,7 @@ class ConnectionTargetAction(WireEnum):
     enable = "enable"
     install = "install"
     reconnect = "reconnect"
+    update = "update"
 
 
 class ConnectionTargetState(WireEnum):
@@ -42,6 +43,7 @@ class ConnectionTargetState(WireEnum):
     pending = "pending"
     initiated = "initiated"
     connected = "connected"
+    updated = "updated"
     skipped = "skipped"
     failed = "failed"
     expired = "expired"
@@ -188,6 +190,9 @@ class ConnectionOperationTarget(Payload):
     already_installed: bool | None = None
     # Installed skill row from an optional-skill stub that pulls a third-party repo live: that repo.
     upstream_repo: str | None = None
+    # MCP updates persist configuration without replacing any running session connection.
+    configuration_updated: bool | None = None
+    reload_required: bool | None = None
 
 
 class ConnectionDisplay(Payload):

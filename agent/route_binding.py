@@ -97,6 +97,10 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     agent._config_context_length = None
     agent.model, agent.provider, agent.requested_provider = model, provider, provider
     agent.base_url, agent.api_mode = base_url, api_mode
+    agent._timeout_provider = provider
+    agent._provider_streaming = None
+    from agent.agent_init import refresh_route_streaming
+    refresh_route_streaming(agent)
     # reasoning_content echo opt-in travels with the active provider; restore_primary_runtime reverts it.
     agent._reasoning_echo_flag = bool(entry.get("reasoning_echo", False))
     if hasattr(agent, "_transport_cache"):

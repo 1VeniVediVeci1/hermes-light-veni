@@ -85,6 +85,19 @@ describe('panel letter shortcuts', () => {
 describe('settled connection lines', () => {
   afterEach(resetConnectionOperationsForTests)
 
+  it('reports a configuration update without claiming a live connection or tools', () => {
+    const target = { action: 'update', kind: 'mcp', name: 'ghidra', state: 'pending' }
+    applyConnectionRequest({ deadline_at: 0, op_id: 'update-op', seq: 1, targets: [target] } as never)
+    const lines = applyConnectionUpdate({
+      deadline_at: 0,
+      op_id: 'update-op',
+      seq: 2,
+      settled: true,
+      targets: [{ ...target, state: 'updated', configuration_updated: true, reload_required: true }]
+    } as unknown as ConnectionUpdatePayload)
+    expect(lines).toEqual(['ghidra: Updated'])
+  })
+
   it('tell the user the name the agent chose once an aliased account connects', () => {
     const target = { action: 'connect', alias: 'work', kind: 'connector', name: 'gmail', state: 'initiated' }
 

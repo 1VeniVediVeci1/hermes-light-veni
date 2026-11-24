@@ -10,6 +10,7 @@ from tools.connectors.catalog_tool import MANAGE_CATALOG_SCHEMA, manage_catalog
 from tools.connectors.gateway import config as gateway_config
 from tools.connectors.managed import run_managed_action
 from tools.connectors.mcp import run_mcp_operation
+from tools.connectors.mcp_update import UPDATE_SCHEMA, validate_updates
 from tools.connectors.targets import ALIAS_PATTERN, ALL_ACTIONS, MCP_ACTIONS, normalize_targets, validate_action
 from tools.registry import registry, tool_error
 
@@ -33,11 +34,20 @@ def manage_connections(
     action_error = validate_action(action, managed, mcp_targets)
     if action_error:
         return tool_error(action_error)
+    if action == "update":
+        if len(mcp_targets) != 1:
+            return tool_error("update takes exactly one configured MCP target.")
+        update_error = validate_updates(args.get("updates"))
+        if update_error:
+            return tool_error(update_error)
+    elif "updates" in args:
+        return tool_error("'updates' is only supported with action update.")
 
     if action in MCP_ACTIONS:
         return run_mcp_operation(
             mcp_targets, action, backend=mcp_backend,
             connection_callback=connection_callback, session_id=session_id, tool_call_id=tool_call_id,
+            updates=args.get("updates"),
         )
 
     return run_managed_action(
@@ -51,8 +61,8 @@ def manage_connections(
 MANAGE_CONNECTIONS_SCHEMA = {
     "name": "manage_connections",
     "description": (
-        "Connect the user's app accounts and install MCP servers. Two kinds: a hosted connector account (Gmail, Notion, ...) "
-        "served through the tool gateway, and a local MCP server from the bundled catalog. Many names exist on "
+        "Connect the user's app accounts and install or update MCP servers. Two kinds: a hosted connector account (Gmail, Notion, ...) "
+        "served through the tool gateway, and a local MCP server (a bundled catalog entry or an already configured custom server). Many names exist on "
         "both sides, so the user's own words decide: a target is MCP only when the user asks for "
         "an MCP server, a local server or an install, or when the name exists only as a catalog "
         "entry; otherwise it is hosted. A target the other side owns is refused with the call "
@@ -71,7 +81,12 @@ MANAGE_CONNECTIONS_SCHEMA = {
         "connect_url per app for the USER to open in a browser (never open it yourself); ask them "
         "to say when they are done, then use 'status'. "
         "MCP: 'install' adds a catalog entry, 'enable' re-enables a disabled configured server, "
-        "'authorize' runs its OAuth. They show the user an approval card and block until it "
+        "'authorize' runs its OAuth. 'update' takes exactly one configured stdio server (including "
+        "non-catalog custom servers) and an 'updates' object with command, args, timeout and/or "
+        "connect_timeout; it probes the replacement before saving, preserves omitted settings and "
+        "credentials, and never restarts live connections. Its success is 'updated', not 'connected'; "
+        "reload_required means existing clients must be reloaded safely before claiming the new launch "
+        "is active. They show the user an approval card and block until it "
         "settles; where no card exists the target runs at once and the result says what happened, "
         "with a link for the user to open when one is needed. A connected server's tools are "
         "named in the result and are callable at once through tool_describe/tool_call. Never "
@@ -89,7 +104,7 @@ MANAGE_CONNECTIONS_SCHEMA = {
                 "enum": list(ALL_ACTIONS),
                 "description": (
                     "Defaults to status. connect, reconnect and rename take hosted connector slugs only; "
-                    "install, enable and authorize take mcp:true targets only."
+                    "install, update, enable and authorize take mcp:true targets only."
                 ),
             },
             "connectors": {
@@ -104,8 +119,8 @@ MANAGE_CONNECTIONS_SCHEMA = {
                                 "mcp": {
                                     "type": "boolean",
                                     "description": (
-                                        "true = a local MCP server from the catalog; absent, false or a "
-                                        "bare slug = a hosted connector account."
+                                        "true = a local MCP server (catalog or configured custom); absent, "
+                                        "false or a bare slug = a hosted connector account."
                                     ),
                                 },
                                 "alias": {
@@ -135,6 +150,7 @@ MANAGE_CONNECTIONS_SCHEMA = {
                     "status."
                 ),
             },
+            "updates": UPDATE_SCHEMA,
             "force": {
                 "type": "boolean",
                 "description": "reconnect only: restart the authorization even if the app is connected (account switch).",

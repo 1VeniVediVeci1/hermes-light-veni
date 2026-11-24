@@ -147,7 +147,7 @@ Some commands are so catastrophic — irreversible filesystem wipes, fork bombs,
 - Cron jobs running in headless `approve` mode
 - User explicitly clicking "allow always"
 
-The blocklist is the floor below `--yolo`. It trips **before** the approval layer even sees the command, and there's no override flag. Patterns currently covered (not exhaustive; kept in sync with `tools/approval_detection.py::HARDLINE_PATTERNS`):
+The blocklist is the floor below `--yolo`. It trips **before** the approval layer even sees the command, and no approval setting overrides it — only `approvals.hardline_allow` (below) exempts a class you name. Patterns currently covered (not exhaustive; kept in sync with `tools/approval_detection.py::HARDLINE_PATTERNS`):
 
 | Pattern | Why it's hardline |
 |---|---|
@@ -160,13 +160,26 @@ The blocklist is the floor below `--yolo`. It trips **before** the approval laye
 | `Restart-Computer` / `Stop-Computer` (a plain `-WhatIf` preview stays approvable) | Windows analogue of `shutdown`/`reboot` |
 | Piping untrusted URLs to `sh` at the rootfs top level | Remote-code-execution attack vector too broad to approve |
 
-If you hit the blocklist, the tool call returns an explanatory error to the agent and nothing runs. If a legitimate workflow needs one of these commands (you're the operator of a wipe-and-reinstall pipeline, for example), run it outside the agent.
+If you hit the blocklist, the tool call returns an explanatory error to the agent and nothing runs. If a legitimate workflow needs one of these commands (you're the operator of a wipe-and-reinstall pipeline, for example), either add a matching glob to `approvals.hardline_allow` or run it outside the agent.
 
 The floor also fails closed on a command whose shell quoting cannot be parsed (`grep 'unterminated`): the error says `malformed executable payload`. Quoting is judged on the command exactly as written, so shell-valid escapes inside a quoted pattern (`grep -o "[^\"]*" file`) are not malformed, and an escaped quote before a separator (`echo "a\"b"; reboot`) does not hide the command that follows it.
 
+### Hardline Allow List (`approvals.hardline_allow`)
+
+The hardline blocklist is code-shipped and applies to every approval mode. On a machine you own, `approvals.hardline_allow` exempts the classes you name: a list of glob patterns that are consulted **only after** a hardline rule already matched, so a broad glob cannot quietly allow unrelated commands. An exempted command continues through the normal approval layer (so `smart` may still ask about it).
+
+```yaml
+approvals:
+  hardline_allow:
+    - "*shutdown*"          # let the agent reboot/power off this host
+    - "*Restart-Computer*"
+```
+
+Matching uses the same case-insensitive fnmatch globs and normalized variants as `approvals.deny` below. Everything not matched stays hardline.
+
 ### User-Defined Deny Rules (`approvals.deny`)
 
-The hardline blocklist is fixed and code-shipped. `approvals.deny` is its user-editable counterpart: a list of glob patterns that block matching terminal commands unconditionally — **before** `--yolo`, `/yolo`, and `approvals.mode: off` are consulted. Use it to run yolo-with-exceptions: "let the agent do everything, except these specific things, ever."
+`approvals.deny` is the blocking counterpart: a list of glob patterns that block matching terminal commands unconditionally — **before** `--yolo`, `/yolo`, and `approvals.mode: off` are consulted. Use it to run yolo-with-exceptions: "let the agent do everything, except these specific things, ever."
 
 ```yaml
 approvals:

@@ -3,32 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// Relative, not `@hermes/shared`: the electron bundle is built by esbuild with
-// no tsconfig path resolution (see scripts/bundle-electron-main.mjs), so a bare
-// specifier would typecheck and then fail to bundle.
-import {
-  clampDataUrlReadMaxMb,
-  DATA_URL_READ_DEFAULT_MAX_MB,
-  DATA_URL_READ_MAX_MAX_MB,
-  DATA_URL_READ_MIN_MAX_MB
-} from '../../shared/src/data-url-read-max'
-
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000
-// Remote file.attach sends one base64 JSON-RPC frame. Cap the dedicated attach
-// reader so the payload still fits uvicorn's raised ws_max_size (384 MiB)
-// after base64 + framing. Preview stays on the Settings-configurable path.
-const ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
-const TEXT_PREVIEW_SOURCE_MAX_BYTES = 64 * 1024 * 1024
-// Renderer-supplied composer writes (pasted/dropped images, large text pastes)
-// land on disk under userData/HERMES_HOME; cap them like the attach reader so
-// one IPC call can't allocate or write unbounded bytes in the main process.
-const COMPOSER_IMAGE_MAX_BYTES = ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES
-const COMPOSER_PASTE_MAX_BYTES = TEXT_PREVIEW_SOURCE_MAX_BYTES
-
-function dataUrlReadMaxBytesFromMb(maxMb) {
-  return clampDataUrlReadMaxMb(maxMb) * 1024 * 1024
-}
-
 const SAFE_ENV_SUFFIXES = new Set(['dist', 'example', 'sample', 'template'])
 const SENSITIVE_EXTENSIONS = new Set(['.kdbx', '.p12', '.pem', '.pfx'])
 
@@ -477,8 +452,8 @@ function ipcPathError(code: any, message: string): Error & { code: any } {
   return error
 }
 
-/** Validate saveImageBuffer's payload: raw bytes only, non-empty, size-capped. */
-function composerImageBufferFromIpc(data: unknown, maxBytes = COMPOSER_IMAGE_MAX_BYTES): Buffer {
+// Image/HTML staging accepts only non-empty raw bytes.
+function composerImageBufferFromIpc(data: unknown): Buffer {
   let buffer: Buffer | null = null
 
   if (Buffer.isBuffer(data)) {
@@ -493,23 +468,12 @@ function composerImageBufferFromIpc(data: unknown, maxBytes = COMPOSER_IMAGE_MAX
     throw ipcPathError('invalid-image-data', 'saveImageBuffer: missing data')
   }
 
-  if (buffer.byteLength > maxBytes) {
-    throw ipcPathError('EFBIG', `saveImageBuffer: image is too large (${buffer.byteLength} bytes; limit ${maxBytes}).`)
-  }
-
   return buffer
 }
 
-/** Validate savePastedText's payload: a non-empty string under the paste cap. */
-function composerPasteTextFromIpc(text: unknown, maxBytes = COMPOSER_PASTE_MAX_BYTES): string {
+function composerPasteTextFromIpc(text: unknown): string {
   if (typeof text !== 'string' || !text) {
     throw ipcPathError('invalid-text', 'savePastedText: missing text')
-  }
-
-  const size = Buffer.byteLength(text, 'utf8')
-
-  if (size > maxBytes) {
-    throw ipcPathError('EFBIG', `savePastedText: text is too large (${size} bytes; limit ${maxBytes}).`)
   }
 
   return text
@@ -802,16 +766,8 @@ function missingFileResult(requestedPath: unknown, error: unknown) {
 
 export {
   assertExistingPathForOpen,
-  ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
-  clampDataUrlReadMaxMb,
-  COMPOSER_IMAGE_MAX_BYTES,
-  COMPOSER_PASTE_MAX_BYTES,
   composerImageBufferFromIpc,
   composerPasteTextFromIpc,
-  DATA_URL_READ_DEFAULT_MAX_MB,
-  DATA_URL_READ_MAX_MAX_MB,
-  DATA_URL_READ_MIN_MAX_MB,
-  dataUrlReadMaxBytesFromMb,
   DEFAULT_FETCH_TIMEOUT_MS,
   enableBasicPasswordStoreEncryption,
   encryptDesktopSecret,
@@ -830,7 +786,6 @@ export {
   SECRET_FILE_MODE,
   sensitiveFileBlockReason,
   setSensitiveHermesHome,
-  TEXT_PREVIEW_SOURCE_MAX_BYTES,
   tightenSecretFileMode,
   writeSecretFileAtomic
 }

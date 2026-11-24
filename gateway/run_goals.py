@@ -26,6 +26,43 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
+def _goal_main_runtime_from_agent(agent: Any) -> Optional[dict]:
+    """In-memory, one-turn route handoff; credentials are never persisted or logged."""
+    if agent is None:
+        return None
+    runtime = {}
+    for field in ("provider", "requested_provider", "timeout_provider", "model", "base_url", "api_key", "api_mode", "auth_mode", "session_id"):
+        value = getattr(agent, "_timeout_provider" if field == "timeout_provider" else field, None)
+        if field == "api_key" and callable(value) and not isinstance(value, str):
+            runtime[field] = value
+        elif isinstance(value, str) and value.strip():
+            runtime[field] = value.strip()
+    return runtime or None
+
+
+def _remember_goal_main_runtime_snapshot(runner: Any, session_key: str, generation: Optional[int], agent: Any) -> None:
+    runtime = _goal_main_runtime_from_agent(agent)
+    if runtime and session_key:
+        snapshots = getattr(runner, "_goal_main_runtime_snapshots", None)
+        if not isinstance(snapshots, dict):
+            snapshots = {}
+            setattr(runner, "_goal_main_runtime_snapshots", snapshots)
+        snapshots.setdefault((session_key, generation), runtime)
+
+
+def _consume_goal_main_runtime_snapshot(runner: Any, session_key: str, generation: Optional[int]) -> Optional[dict]:
+    snapshots = getattr(runner, "_goal_main_runtime_snapshots", None)
+    if not isinstance(snapshots, dict):
+        return None
+    runtime = snapshots.pop((session_key, generation), None)
+    is_current = getattr(runner, "_is_session_run_current", None)
+    if is_current is not None and not is_current(session_key, generation):
+        runtime = None
+    if not snapshots:
+        delattr(runner, "_goal_main_runtime_snapshots")
+    return runtime if isinstance(runtime, dict) and runtime else None
+
+
 class GatewayGoalsMixin:
     """Goal/heartbeat continuation, post-turn hooks and loop-wakeup watcher methods for GatewayRunner."""
 
@@ -311,7 +348,7 @@ class GatewayGoalsMixin:
 
     async def _post_turn_goal_continuation(
         self, *, session_entry: Any, source: Any, final_response: str,
-        run_generation: int | None = None,
+        run_generation: int | None = None, main_runtime: Optional[dict] = None,
     ) -> None:
         """Run the goal judge after a gateway turn (AFTER delivery) and, if still active, enqueue a
         continuation through the adapter FIFO so a simultaneous real user message takes priority."""
@@ -338,7 +375,7 @@ class GatewayGoalsMixin:
         decision = await self._run_in_executor_with_context(
             lambda: mgr.evaluate_after_turn(
                 final_response or "", user_initiated=True, background_processes=_bg_procs,
-                active_delegations=_active_deleg,
+                active_delegations=_active_deleg, main_runtime=main_runtime,
             ),
         )
         msg = decision.get("message") or ""
@@ -369,6 +406,7 @@ class GatewayGoalsMixin:
 
     async def _run_post_turn_hooks(
         self, *, agent_result: Any, source: Any, is_internal: bool, event: Any = None,
+        main_runtime: Optional[dict] = None,
     ) -> None:
         """Run goal and loop bookkeeping after an agent turn returns."""
         from gateway.session_authorities import active_authority
@@ -396,9 +434,12 @@ class GatewayGoalsMixin:
             try:
                 # Both hooks may defer a notice into this turn's post-delivery slot: each needs
                 # the turn's generation or the chained bubble cleanup loses it.
-                await hook(session_entry=session_entry, source=source,
-                           final_response="" if failed else final_text,
-                           run_generation=turn_run_generation(event))
+                kwargs = {"session_entry": session_entry, "source": source,
+                          "final_response": "" if failed else final_text,
+                          "run_generation": turn_run_generation(event)}
+                if label == "goal continuation":
+                    kwargs["main_runtime"] = main_runtime
+                await hook(**kwargs)
             except Exception as exc:
                 logger.debug("%s hook failed: %s", label, exc)
         await self._publish_local_control(source, only_if_present=True)

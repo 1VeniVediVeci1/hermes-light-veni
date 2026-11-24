@@ -12,6 +12,7 @@ The mutation names the session a viewer resumed, which for a compressed chat is 
 route, so it applies to the compression tip the next turn writes.
 """
 import asyncio
+from typing import NamedTuple
 
 from hermes_state_runtime import RuntimeStoreError
 
@@ -103,12 +104,16 @@ async def apply_chat_pick(authority, ref, owner, live, params, *, principal_id):
     return result
 
 
-def messaging_route_info(runner, live):
-    """``model`` and the effort fields a messaging chat's next turn resolves, without building an agent
-    or resolving credentials: session ``/model`` > ``channel_overrides`` > config.yaml, and the session
-    ``/reasoning`` > per-model > global level (``_resolve_session_reasoning_config``)."""
+class _MessagingModelRoute(NamedTuple):
+    model: str
+    provider: str | None
+    base_url: str | None
+    api_mode: str | None
+
+
+def messaging_model_route(runner, live):
+    """The next turn's selected route without building an agent or resolving credentials."""
     from gateway.run import _load_gateway_config, _resolve_gateway_model
-    from gateway.session_local import effort_fields
     config = _load_gateway_config()
     block = config.get('model')
     block = block if isinstance(block, dict) else {}
@@ -122,6 +127,13 @@ def messaging_route_info(runner, live):
     # The wire level clamps per api_mode (a Codex app-server route keeps ``ultra``); config.yaml's
     # api_mode belongs to its own provider only.
     api_mode = override.get('api_mode') or (block.get('api_mode') if provider == block.get('provider') else None)
+    return _MessagingModelRoute(model, provider, base_url, api_mode)
+
+
+def messaging_route_info(runner, live):
+    """The selected route and effort shown by viewers of an idle messaging chat."""
+    from gateway.session_local import effort_fields
+    model, provider, base_url, api_mode = messaging_model_route(runner, live)
     reasoning = runner._resolve_session_reasoning_config(source=live.source, session_key=live.route, model=model)
     tier = runner._resolve_session_service_tier(source=live.source, session_key=live.route)
-    return {'model': model, **effort_fields(reasoning, tier, model, provider, base_url, api_mode)}
+    return {'model': model, 'provider': provider or '', **effort_fields(reasoning, tier, model, provider, base_url, api_mode)}

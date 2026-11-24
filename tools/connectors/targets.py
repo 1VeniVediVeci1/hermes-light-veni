@@ -8,7 +8,7 @@ from typing import Any, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 CONNECTOR_ACTIONS = ("display", "status", "connect", "reconnect", "rename")
-MCP_ACTIONS = ("install", "enable", "authorize")
+MCP_ACTIONS = ("install", "enable", "authorize", "update")
 ALL_ACTIONS = CONNECTOR_ACTIONS + MCP_ACTIONS
 
 _TARGET_FIELDS = frozenset({"name", "mcp", "alias", "to"})
@@ -51,7 +51,8 @@ def normalize_targets(raw: Any) -> tuple[list[HostedTarget], list[str], Optional
                 return [], [], (
                     f"unknown target field(s) {', '.join(unknown)}: a target is "
                     "{\"name\": \"<slug>\"} or {\"name\": \"<server>\", \"mcp\": true}. Transport, "
-                    "URLs and credentials come from the catalog manifest, never from the call."
+                    "URLs and credentials come from the catalog manifest, never from the call. "
+                    "For an existing stdio server, action update takes a separate 'updates' object."
                 )
             name = str(item.get("name") or "").strip().lower()
             is_mcp = bool(item.get("mcp", False))

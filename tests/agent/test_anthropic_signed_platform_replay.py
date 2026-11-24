@@ -40,6 +40,14 @@ _CASES = {
     "native_haiku45": (None, "claude-haiku-4-5", LOOP, True),
     "native_sonnet45": (None, "claude-sonnet-4-5", LOOP, True),
     "native_opus48": (None, "claude-opus-4-8", ALL, True),
+    # Operator-selected Claude relays use native replay, without changing unknown-relay policy.
+    "venichat_opus": ("https://43.163.210.130/v1", "claude-opus-5-5", ALL, True),
+    "venichat_normalized": ("https://43.163.210.130", "claude-sonnet-5-5", ALL, True),
+    "wc_sonnet": ("https://chuanapi.com/v1/", "claude-sonnet-5-5", ALL, True),
+    "wc_legacy_sonnet": ("https://chuanapi.com", "claude-sonnet-4-5", LOOP, True),
+    "wc_retired_host": ("https://hk-test.chuanapi.com/v1", "claude-opus-5-5", NONE, False),
+    "wc_relay_lookalike": ("https://chuanapi.com.evil.test/v1", "claude-opus-5-5", NONE, False),
+    "relay_in_path": ("https://evil.test/https://43.163.210.130/v1", "claude-opus-5-5", NONE, False),
     # Unchanged contracts.
     "unknown_relay": (RELAY, "claude-opus-4-8", NONE, False),
     "bedrock_lookalike_host": ("https://bedrock-runtime.us-east-1.amazonaws.com.evil.test", "claude-opus-4-8", NONE, False),

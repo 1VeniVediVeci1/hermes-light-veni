@@ -686,10 +686,12 @@ class CLIAgentSetupMixin:
                 if single_query_mode
                 else self._clarify_callback)
             connection_callback = None if single_query_mode else self._connection_callback
+            from hermes_cli.route_controls import runtime_agent_controls
             self.agent = AIAgent(
                 model=effective_model, api_key=runtime.get("api_key"),
                 base_url=runtime.get("base_url"), provider=runtime.get("provider"),
                 requested_provider=runtime.get("requested_provider"),
+                **runtime_agent_controls(runtime),
                 api_mode=runtime.get("api_mode"), acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"), credential_pool=runtime.get("credential_pool"),
                 max_iterations=self.max_turns,

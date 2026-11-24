@@ -13,6 +13,7 @@ class TargetState(str, Enum):
     pending = "pending"
     initiated = "initiated"
     connected = "connected"
+    updated = "updated"
     skipped = "skipped"
     failed = "failed"
     expired = "expired"
@@ -41,6 +42,7 @@ RESOLVED_STATES = frozenset({TargetState.connected, TargetState.skipped})
 # again still works while another row keeps the operation open, and the failed row keeps its state
 # and reason when the operation settles.
 _RESOLVED_BY_KIND = {kind: RESOLVED_STATES | {TargetState.failed} for kind in ("plugin", "skill")}
+_RESOLVED_BY_KIND["mcp"] = RESOLVED_STATES | {TargetState.updated}
 
 
 def resolves(kind: str, state: TargetState) -> bool:
@@ -68,6 +70,9 @@ for _kind in ("plugin", "skill"):
     for (_k, _from), _edges in list(TRANSITIONS.items()):
         if _k == "mcp":
             TRANSITIONS[(_kind, _from)] = dict(_edges)
+
+# A persisted update is not a witness that any existing live client reloaded it.
+TRANSITIONS[("mcp", _S.initiated)][_S.updated] = _A.backend_watcher
 
 
 def allowed(kind: str, current: TargetState, to: TargetState) -> Optional[Actor]:

@@ -16,7 +16,8 @@ export const connectionEn = {
       connect: 'Connect',
       enable: 'Enable',
       install: 'Install',
-      reconnect: 'Reconnect'
+      reconnect: 'Reconnect',
+      update: 'Update'
     },
     // {0} app, {1} account name the agent chose
     namedAccount: (app: string, alias: string) => `Hermes named this ${app} account ${alias}. Rename it anytime.`,
@@ -40,7 +41,8 @@ export const connectionEn = {
     status: {
       finishing: 'Finishing…',
       working: 'Working…',
-      pending: 'Pending…'
+      pending: 'Pending…',
+      updated: 'Updated'
     },
     authorized: {
       title: 'Authorized. Tools unavailable.',

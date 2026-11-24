@@ -170,13 +170,19 @@ def _resolve_aux_verify(base_url: Optional[str]) -> Any:
 _WARNED_KEEPALIVE_IMPORT_SKEW = False
 
 
-def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = False) -> dict[str, Any]:
-    """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
+def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = False,
+                               provider_id: Optional[str] = None) -> dict[str, Any]:
+    """Inject keepalive HTTP with named-route policy or environment proxy inheritance."""
+    from hermes_cli.route_controls import openai_transport_controls
+    controls = openai_transport_controls(str(base_url or ""), provider_id)
     try:
         from agent.process_bootstrap import build_keepalive_http_client
         client = build_keepalive_http_client(
-            str(base_url or ""), async_mode=async_mode, verify=_resolve_aux_verify(base_url))
+            str(base_url or ""), async_mode=async_mode, verify=_resolve_aux_verify(base_url),
+            **controls)
     except (ImportError, AttributeError):
+        if controls.get("proxy_url") is not None or controls.get("proxy_fallback_to_direct"):
+            raise RuntimeError("Explicit route transport is unavailable; refusing SDK defaults") from None
         # Version-skewed install (Desktop runtime lagging a git tree) lacks this helper:
         # degrade to the SDK default httpx client rather than kill the job; warn once.
         global _WARNED_KEEPALIVE_IMPORT_SKEW
@@ -188,14 +194,20 @@ def _openai_http_client_kwargs(base_url: Optional[str], *, async_mode: bool = Fa
                 "back to the SDK default HTTP client. Run `hermes update` (or "
                 "reinstall the Desktop app) to resync the runtime.")
         client = None
+    if client is None and (controls.get("proxy_url") is not None or controls.get("proxy_fallback_to_direct")):
+        raise RuntimeError("Explicit route transport is unavailable; refusing SDK defaults")
     return {"http_client": client} if client is not None else {}
 
 
-def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+def _create_openai_client(*, api_key: str, base_url: str, provider_id: Optional[str] = None, **kwargs: Any) -> Any:
     if _aux_probe_active():
         # Availability probe: resolved credentials/base_url are the answer.
         return _AuxProbeClientStub(api_key=api_key, base_url=base_url)
-    kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
+    http_kwargs = (
+        _openai_http_client_kwargs(base_url, provider_id=provider_id)
+        if provider_id else _openai_http_client_kwargs(base_url)
+    )
+    kwargs = {**http_kwargs, **kwargs}
     _apply_required_codex_headers(kwargs, access_token=api_key, base_url=base_url)
     # Hermes owns aux retry/fallback policy; the SDK default (max_retries=2) would triple
     # wall time on a hung endpoint before Hermes sees one failure.
@@ -206,7 +218,11 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # SDK-internal retries by default and let Hermes control the budget; explicit callers can still override
     # via kwargs.
     kwargs.setdefault("max_retries", 0)
-    return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
+    client = OpenAI(api_key=api_key, base_url=base_url, **kwargs)
+    if provider_id:
+        with contextlib.suppress(AttributeError, TypeError):
+            client._hermes_aux_transport_provider = provider_id
+    return client
 
 
 # Interrupt protection for atomic aux tasks: a compression summary killed by an ordinary
@@ -1765,12 +1781,16 @@ class _AnthropicCompletionsAdapter:
                 total_tokens=getattr(response.usage, "total_tokens", 0) or (prompt_tokens + completion_tokens),
             )
         # ToolCall already duck-types as OpenAI shape via properties.
-        choice = SimpleNamespace(
-            index=0,
-            message=SimpleNamespace(content=_nr.content, tool_calls=_nr.tool_calls, reasoning=_nr.reasoning),
-            finish_reason=_nr.finish_reason,
+        message = SimpleNamespace(content=_nr.content, tool_calls=_nr.tool_calls, reasoning=_nr.reasoning)
+        # A ``refusal`` stop explains itself only in ``stop_details`` (category/explanation); keep it
+        # and the native stop_reason so callers relaying this response (MoA aggregator) can report them.
+        stop_details = (_nr.provider_data or {}).get("stop_details")
+        if stop_details is not None:
+            message.stop_details = stop_details
+        choice = SimpleNamespace(index=0, message=message, finish_reason=_nr.finish_reason)
+        return SimpleNamespace(
+            choices=[choice], model=model, usage=usage, stop_reason=getattr(response, "stop_reason", None),
         )
-        return SimpleNamespace(choices=[choice], model=model, usage=usage)
 
 
 class AnthropicAuxiliaryClient:
@@ -3061,7 +3081,7 @@ def _try_anthropic(explicit_api_key: Optional[str | Callable[[], str]] = None,
 
 _MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
 _MAIN_RUNTIME_CONTEXT_FIELDS = _MAIN_RUNTIME_FIELDS + (
-    "requested_provider", "session_id", "cache_scope",
+    "requested_provider", "timeout_provider", "session_id", "cache_scope",
 )
 
 
@@ -3082,7 +3102,7 @@ def _normalize_main_runtime(main_runtime: Optional[dict[str, Any]]) -> dict[str,
             normalized[field] = value
         elif isinstance(value, str) and value.strip():
             normalized[field] = value.strip()
-    for identity_field in ("provider", "requested_provider"):
+    for identity_field in ("provider", "requested_provider", "timeout_provider"):
         identity = normalized.get(identity_field)
         if isinstance(identity, str):
             normalized[identity_field] = identity.lower()
@@ -3569,7 +3589,7 @@ def _prepare_same_provider_retry(
         effective_provider or resolved_provider, retry_model or final_model, messages,
         temperature=temperature, max_tokens=max_tokens, tools=tools, timeout=effective_timeout,
         extra_body=effective_extra_body, reasoning_config=reasoning_config,
-        base_url=retry_base or resolved_base_url, task=task,
+        base_url=retry_base or resolved_base_url, task=task, api_mode=resolved_api_mode,
     )
     # Preserve per-request attribution headers (a profile's ``request_headers``) across the rebuilt-client
     # retry: dropping them would let a recovery retry silently lose capability gating (#60293).
@@ -3833,7 +3853,8 @@ def _fallback_request_kwargs(
     fb_kwargs = _build_call_kwargs(
         destination.provider, destination.model, fallback_messages,
         temperature=temperature, max_tokens=fallback_max_tokens, tools=fallback_tools, timeout=effective_timeout,
-        extra_body=fallback_extra_body, reasoning_config=reasoning_config, base_url=destination.base_url, task=task)
+        extra_body=fallback_extra_body, reasoning_config=reasoning_config, base_url=destination.base_url,
+        task=task, api_mode=destination.api_mode)
     return fb_kwargs
 
 
@@ -4346,7 +4367,8 @@ def _warn_stale_openai_base_url(runtime_provider: str) -> None:
 def _main_route_target(runtime: dict[str, Any], task: Optional[str]) -> tuple[str, str, str, Any, str]:
     """Step-1 target: (provider, model, base_url, api_key, api_mode) of the main runtime, after the
     fast-model opt-in and the MoA aggregator substitution."""
-    main_provider = str(runtime.get("provider", "") or _read_main_provider() or "")
+    from agent.auxiliary_route_identity import main_route_provider
+    main_provider = main_route_provider(runtime, _read_main_provider())
     main_model = str(runtime.get("model") or _read_main_model() or "")
     runtime_base_url = str(runtime.get("base_url") or "")
     runtime_api_key = runtime.get("api_key", "")
@@ -4551,11 +4573,20 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     if headers:
         async_kwargs["default_headers"] = headers
     _apply_required_codex_headers(async_kwargs, access_token=sync_client.api_key, base_url=sync_base_url)
-    async_kwargs = {**_openai_http_client_kwargs(sync_base_url, async_mode=True), **async_kwargs}
+    transport_provider = getattr(sync_client, "_hermes_aux_transport_provider", None)
+    http_kwargs = (
+        _openai_http_client_kwargs(sync_base_url, async_mode=True, provider_id=transport_provider)
+        if transport_provider else _openai_http_client_kwargs(sync_base_url, async_mode=True)
+    )
+    async_kwargs = {**http_kwargs, **async_kwargs}
     # Hermes owns the auxiliary retry/timeout budget; disable SDK-internal retries.
     # See #54465.
     async_kwargs.setdefault("max_retries", 0)
-    return AsyncOpenAI(**async_kwargs), model
+    async_client = AsyncOpenAI(**async_kwargs)
+    if transport_provider:
+        with contextlib.suppress(AttributeError, TypeError):
+            async_client._hermes_aux_transport_provider = transport_provider
+    return async_client, model
 
 
 def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optional[str]:
@@ -4942,7 +4973,8 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
     return None, None
 
 
-def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_headers: Optional[dict[str, str]] = None):
+def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_headers: Optional[dict[str, str]] = None,
+                                     provider_id: Optional[str] = None):
     """Plain OpenAI client on the /v1 equivalent of a named custom entry's base URL.
 
     ``extra_headers`` is the entry's own header block (gateway routing tags, proxy auth): the main
@@ -4954,7 +4986,7 @@ def _named_custom_openai_wire_client(custom_base: str, custom_key: Any, extra_he
         _headers = {**(_headers or {}), **extra_headers}
     if _headers:
         _extra["default_headers"] = _headers
-    return _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra)
+    return _create_openai_client(api_key=custom_key, base_url=_clean_base, provider_id=provider_id, **_extra)
 
 
 def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResult]:
@@ -4971,6 +5003,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
         custom_entry = _get_named_custom_provider(provider)
     if not custom_entry:
         return None
+    transport_provider = str(custom_entry.get("provider_key") or custom_entry.get("name") or provider).strip()
     # A per-task/explicit base_url or api_key composes OVER the named entry's defaults: the entry supplies
     # whatever the caller left blank, never replaces what the caller set (compression prompts carry
     # conversation history, so a silently swapped destination is a data-routing bug, not a nuisance).
@@ -5022,14 +5055,17 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
         except ImportError:
             logger.warning("Named custom provider %r declares api_mode=anthropic_messages but the anthropic SDK "
                            "is not installed — falling back to OpenAI-wire.", provider)
-            return _route_client(req, _named_custom_openai_wire_client(custom_base, custom_key, entry_headers), final_model)
+            return _route_client(
+                req, _named_custom_openai_wire_client(custom_base, custom_key, entry_headers, transport_provider), final_model
+            )
         return _route_client(
             req, AnthropicAuxiliaryClient(real_client, final_model, custom_key, custom_base,
                                           is_oauth=anthropic_route_is_oauth(custom_base, custom_key)), final_model)
-    client = _named_custom_openai_wire_client(custom_base, custom_key, entry_headers)
+    client = _named_custom_openai_wire_client(custom_base, custom_key, entry_headers, transport_provider)
     # codex_responses, or auto-detect via _wrap_transport (which reads the task-level api_mode).
     if entry_api_mode == "codex_responses":
-        client = CodexAuxiliaryClient(client, final_model)
+        if not req.raw_codex:
+            client = CodexAuxiliaryClient(client, final_model)
     else:
         client = _wrap_transport(req, client, final_model, custom_base, custom_key)
     return _route_client(req, client, final_model)
@@ -5586,8 +5622,12 @@ def _client_cache_key(
     task: Optional[str] = None, model: Optional[str] = None,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
+    from hermes_cli.route_controls import route_policy_fingerprint
+    from agent.auxiliary_route_identity import main_route_provider
+    logical_provider = main_route_provider(runtime, _read_main_provider()) if provider in {"auto", "custom"} else provider
+    policy = route_policy_fingerprint(logical_provider, base_url or "", model or "")
     # `auto` resolves through the main runtime and task-specific policy, so both join the key.
-    runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS + ("requested_provider", "timeout_provider")) if provider == "auto" else ()
     task_key = (task or "", _task_prefers_fast_model(task)) if provider == "auto" else ""
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
     # Model MUST be in the key: concurrent calls to the same endpoint with different models would
@@ -5597,7 +5637,7 @@ def _client_cache_key(
     # Profile home leads the key: callers that omit api_key (pool / Nous auth.json paths) would
     # otherwise share one client across multiplex profiles holding different credentials.
     return (hermes_home_key(), provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key,
-            _borrowed_main_credential_key(provider, base_url, api_key, runtime))
+            _borrowed_main_credential_key(provider, base_url, api_key, runtime), policy)
 
 
 def _borrowed_main_credential_key(provider: str, base_url: Optional[str], api_key: Any, runtime: dict[str, Any]) -> tuple:
@@ -6520,6 +6560,7 @@ def _build_call_kwargs(
     extra_body: Optional[dict] = None, reasoning_config: Optional[dict] = None,
     base_url: Optional[str] = None, task: Optional[str] = None,
     no_progress_timeout: Optional[float] = None,
+    api_mode: Optional[str] = None,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments.
     ``no_progress_timeout`` is a Codex-Responses-only extra (consumed by
@@ -6542,7 +6583,8 @@ def _build_call_kwargs(
         if not _forbids_sampling_params(model):
             kwargs["temperature"] = temperature
     provider_norm = str(provider or "").strip().lower()
-    if max_tokens is not None and _forwards_max_tokens(provider, provider_norm, model, effective_base, task):
+    messages_wire = api_mode == "anthropic_messages"
+    if max_tokens is not None and (messages_wire or _forwards_max_tokens(provider, provider_norm, model, effective_base, task)):
         kwargs.update(auxiliary_max_tokens_param(max_tokens, model=model))  # picks max_completion_tokens where needed
     if tools:
         kwargs["tools"] = _dedupe_tool_names(tools, provider, model)
@@ -6560,7 +6602,12 @@ def _build_call_kwargs(
             extra_body.pop("reasoning")
             if reasoning_config is None:
                 reasoning_config = task_reasoning
-    reasoning_config = clamp_reasoning_config(known_reasoning_floor(reasoning_config, provider_norm, effective_base, model, task), chat_endpoint_efforts(model, effective_base))
+    reasoning_config = known_reasoning_floor(reasoning_config, provider_norm, effective_base, model, task)
+    # Named custom routes can use Messages at a plain /v1 URL. Their resolved
+    # protocol, not the generic custom profile's OpenAI projection, owns thinking.
+    # Preserve Anthropic's levels for its adapter rather than clamping to OpenAI.
+    if not messages_wire:
+        reasoning_config = clamp_reasoning_config(reasoning_config, chat_endpoint_efforts(model, effective_base))
     projection = _project_provider_profile(provider, provider_norm, model, effective_base, reasoning_config, data_use_requirement(messages))
     kwargs.update(projection.top_level)
     merged_extra = _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm)
@@ -6578,7 +6625,7 @@ def _build_call_kwargs(
     if reasoning_config and isinstance(reasoning_config, dict):
         raw_base = base_url or ""
         if (
-            provider_norm == "anthropic" or projection.messages_wire or _nous_on_messages_wire(provider_norm, model)
+            messages_wire or provider_norm == "anthropic" or projection.messages_wire or _nous_on_messages_wire(provider_norm, model)
             or _endpoint_speaks_anthropic_messages(raw_base) or _is_anthropic_compat_endpoint(provider_norm, raw_base)
         ):
             kwargs["_reasoning_config"] = dict(reasoning_config)
@@ -7330,7 +7377,7 @@ def _prepare_aux_request(
         request_provider, final_model, messages, temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         reasoning_config=reasoning_config, base_url=base_info or resolved_base_url, task=task,
-        no_progress_timeout=no_progress_timeout)
+        no_progress_timeout=no_progress_timeout, api_mode=resolved_api_mode)
     if extra_headers:
         kwargs["extra_headers"] = dict(extra_headers)
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)

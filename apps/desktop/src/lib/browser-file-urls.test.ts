@@ -19,7 +19,7 @@ const FILES = [
 
 const OWNER = { connectionId: LOCAL_CONNECTION_ID, profile: 'default' }
 const win = window
-let requests: { body: Record<string, unknown>; url: URL }[] = []
+let requests: { body: Record<string, unknown>; signal?: AbortSignal | null; url: URL }[] = []
 
 beforeEach(() => {
   requests = []
@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: URL, init?: RequestInit) => {
-      requests.push({ body: JSON.parse(String(init?.body ?? '{}')), url: input })
+      requests.push({ body: JSON.parse(String(init?.body ?? '{}')), signal: init?.signal, url: input })
 
       const answers: Record<string, unknown> = {
         '/api/files/ticket': { ticket: 'stream-ticket' },
@@ -63,6 +63,7 @@ describe.each(FILES)('a Webapp file under $dir', ({ dir, native }) => {
     const [read] = requests
 
     expect(read.url.pathname).toBe('/api/fs/read-data-url')
+    expect(read.signal).toBeUndefined()
     expect(read.url.searchParams.get('path')).toBe(`${native}\\shot one.png`)
   })
 
@@ -76,6 +77,7 @@ describe.each(FILES)('a Webapp file under $dir', ({ dir, native }) => {
     const [read] = requests
 
     expect(read.url.pathname).toBe('/api/fs/read-text')
+    expect(read.signal).toBeUndefined()
     expect(read.url.searchParams.get('path')).toBe(`${native}\\report #1.html`)
   })
 
@@ -85,6 +87,7 @@ describe.each(FILES)('a Webapp file under $dir', ({ dir, native }) => {
     const [ticket] = requests
 
     expect(ticket.url.pathname).toBe('/api/files/ticket')
+    expect(ticket.signal).toBeInstanceOf(AbortSignal)
     expect(ticket.body).toEqual({ path: clip, profile: 'default', route: 'stream' })
     expect(src.pathname).toBe('/api/files/stream')
     expect(Object.fromEntries(src.searchParams)).toEqual({ path: clip, profile: 'default', ticket: 'stream-ticket' })

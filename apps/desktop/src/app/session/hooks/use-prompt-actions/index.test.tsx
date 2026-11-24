@@ -4,6 +4,7 @@ import { act, cleanup, render, waitFor } from '@testing-library/react'
 import type { MutableRefObject } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { HermesApiRequest } from '@/global'
 import { getLatestSessionMessages, getSession } from '@/hermes'
 import { en } from '@/i18n/en'
 import { textPart } from '@/lib/chat-messages'
@@ -48,6 +49,24 @@ beforeEach(() => {
   vi.mocked(getLatestSessionMessages).mockReset()
   vi.mocked(getLatestSessionMessages).mockImplementation(async () => ({ messages: [], session_id: 'session' }))
 })
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+function mockRemoteAttachmentApi() {
+  const api = vi.fn(async ({ path, upload, body }: HermesApiRequest) => {
+    if (path === '/api/chat/file-upload' && upload && 'path' in upload) {
+      return { path: `/remote/uploads/${upload.filename}` }
+    }
+    if (path === '/api/chat/image-upload') {
+      return { path: `/remote/images/${(body as { filename: string }).filename}`, mime_type: 'image/png' }
+    }
+    throw new Error(`Unexpected API request: ${path}`)
+  })
+  vi.stubGlobal('hermesDesktop', { ...window.hermesDesktop, api })
+  return api
+}
 
 vi.mock('@/hermes', () => ({
   getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: 'session' })),
@@ -3420,16 +3439,13 @@ describe('usePromptActions file attachment sync', () => {
     }
   }
 
-  it('uploads file bytes via file.attach on a remote gateway and submits the rewritten ref', async () => {
+  it('uploads a remote file over HTTP and submits the rewritten gateway ref', async () => {
     // Remote gateway can't read the client-disk path, so the desktop must upload
     // the bytes and submit the workspace-relative ref the gateway hands back —
     // not the original /Users/... path (which would dead-end as "outside the
     // allowed workspace").
     $connection.set({ mode: 'remote' } as never)
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl: vi.fn(async () => 'data:text/plain;base64,aGVsbG8=') }
-    })
+    const api = mockRemoteAttachmentApi()
 
     const calls: { method: string; params?: Record<string, unknown> }[] = []
 
@@ -3457,11 +3473,14 @@ describe('usePromptActions file attachment sync', () => {
 
     expect(ok).toBe(true)
     expect(calls.map(c => c.method)).toEqual(['file.attach', 'prompt.submit'])
-    expect(calls[0]?.params).toMatchObject({
+    expect(api).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      method: 'POST', path: '/api/chat/file-upload',
+      upload: { path: '/Users/alice/Downloads/report.txt', filename: 'report.txt' }
+    }))
+    expect(calls[0]?.params).toEqual({
       session_id: RUNTIME_SESSION_ID,
-      path: '/Users/alice/Downloads/report.txt',
-      name: 'report.txt',
-      data_url: 'data:text/plain;base64,aGVsbG8='
+      path: '/remote/uploads/report.txt',
+      name: 'report.txt'
     })
     expect(calls[1]?.params).toEqual({
       session_id: RUNTIME_SESSION_ID,
@@ -3629,7 +3648,7 @@ describe('usePromptActions file attachment sync', () => {
       submitted = handle!.submitTextRaw('describe this')
     })
 
-    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything()))
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything(), 0))
     $composerAttachments.set([replacement])
     resolveAttach({ attached: true, path: '/root/tmp/photo.jpg' })
 
@@ -3696,10 +3715,7 @@ describe('usePromptActions file attachment sync', () => {
     $connection.set({ mode: 'remote' } as never)
     const original = fileAttachment()
 
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl: vi.fn(async () => 'data:text/plain;base64,aGVsbG8=') }
-    })
+    mockRemoteAttachmentApi()
 
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'file.attach') {
@@ -3890,10 +3906,7 @@ describe('usePromptActions eager-upload races', () => {
     // under .hermes/desktop-attachments/. Submit must await the in-flight upload
     // and reuse its gateway-side ref.
     $connection.set({ mode: 'remote' } as never)
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl: vi.fn(async () => 'data:application/pdf;base64,JVBERi0=') }
-    })
+    const api = mockRemoteAttachmentApi()
 
     let releaseAttach: () => void = () => {}
     const methods: string[] = []
@@ -3928,7 +3941,8 @@ describe('usePromptActions eager-upload races', () => {
     releaseAttach()
 
     expect(await submitting).toBe(true)
-    // Exactly one file.attach (submit reused the eager result), then the send.
+    // Submit reused both the HTTP staging and its attach result.
+    expect(api).toHaveBeenCalledTimes(1)
     expect(methods.filter(m => m === 'file.attach').length).toBe(1)
     expect(methods).toContain('prompt.submit')
   })
@@ -4436,10 +4450,7 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
     let releaseAttach: () => void = () => {}
 
     $connection.set({ mode: 'remote' } as never)
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl: vi.fn(async () => 'data:text/plain;base64,aGVsbG8=') }
-    })
+    mockRemoteAttachmentApi()
 
     const createBackendSessionForSend = vi.fn(async () => {
       activeSessionIdRef.current = NEW_RUNTIME_ID
@@ -4523,10 +4534,7 @@ describe('usePromptActions new-chat first-send delivery (#63078)', () => {
     let releaseFileAttach: () => void = () => {}
 
     $connection.set({ mode: 'remote' } as never)
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl: vi.fn(async () => 'data:application/pdf;base64,JVBERi0=') }
-    })
+    mockRemoteAttachmentApi()
 
     const createBackendSessionForSend = vi.fn(async () => {
       activeSessionIdRef.current = NEW_RUNTIME_ID
@@ -5107,8 +5115,7 @@ describe('usePromptActions eager attachment upload (drop-time)', () => {
     // is instant and the card can show a spinner while bytes upload — instead of
     // waiting for submit.
     $connection.set({ mode: 'remote' } as never)
-    const readFileDataUrl = vi.fn(async () => 'data:application/pdf;base64,JVBERi0=')
-    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { readFileDataUrl } })
+    const api = mockRemoteAttachmentApi()
 
     const calls: string[] = []
 
@@ -5140,15 +5147,15 @@ describe('usePromptActions eager attachment upload (drop-time)', () => {
     const chip = $composerAttachments.get()[0]!
     expect(chip.refText).toBe('@file:.hermes/desktop-attachments/DEVIS_signed.pdf')
     expect(chip.uploadState).toBeUndefined()
-    expect(readFileDataUrl).toHaveBeenCalledWith('/Users/mahmoud/Downloads/DEVIS_signed.pdf')
+    expect(api).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      method: 'POST', path: '/api/chat/file-upload',
+      upload: { path: '/Users/mahmoud/Downloads/DEVIS_signed.pdf', filename: 'DEVIS_signed.pdf' }
+    }))
   })
 
   it('flags the chip uploadState=error when the eager upload fails, keeping the path so submit can retry', async () => {
     $connection.set({ mode: 'remote' } as never)
-    Object.defineProperty(window, 'hermesDesktop', {
-      configurable: true,
-      value: { readFileDataUrl: vi.fn(async () => 'data:application/pdf;base64,JVBERi0=') }
-    })
+    mockRemoteAttachmentApi()
 
     const requestGateway = vi.fn(async (method: string) => {
       if (method === 'file.attach') {
@@ -5165,12 +5172,16 @@ describe('usePromptActions eager attachment upload (drop-time)', () => {
     )
 
     await waitFor(() => expect($composerAttachments.get()[0]?.uploadState).toBe('error'))
+    expect(requestGateway).toHaveBeenCalledWith('file.attach', {
+      name: 'x.pdf', path: '/remote/uploads/x.pdf', session_id: RUNTIME_SESSION_ID
+    }, 0)
     expect($composerAttachments.get()[0]?.attachedSessionId).toBeUndefined()
     expect($composerAttachments.get()[0]?.path).toBe('/abs/x.pdf')
   })
 
   it('does not eagerly re-upload a chip already attached to this session', async () => {
     $connection.set({ mode: 'remote' } as never)
+    const api = mockRemoteAttachmentApi()
     const requestGateway = vi.fn(async () => ({}) as never)
 
     $composerAttachments.set([
@@ -5189,7 +5200,8 @@ describe('usePromptActions eager attachment upload (drop-time)', () => {
     )
 
     await Promise.resolve()
-    expect(requestGateway).not.toHaveBeenCalledWith('file.attach', expect.anything())
+    expect(api).not.toHaveBeenCalled()
+    expect(requestGateway.mock.calls.map((call: readonly unknown[]) => call[0])).not.toContain('file.attach')
   })
 })
 

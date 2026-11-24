@@ -3307,6 +3307,10 @@ export const jaOverrides = {
 
   assistant: {
     mcpSetup: {
+      updateTitle: 'MCP サーバーを更新',
+      updateAction: '更新',
+      updateSetup: server => `${server} を更新`,
+      updated: server => `${server} を更新しました`,
       launchCommand: target => `実行: ${target}`,
       launchRemote: target => `接続先: ${target}`,
       launchEnv: keys => `環境変数: ${keys}`,

@@ -2,6 +2,7 @@ import type { TranslationOverrides } from './define-locale'
 
 export const ruConnectors = {
   connectors: {
+    updated: 'Обновлено',
     directory: {
       suggested: 'Рекомендуемые',
       allApps: 'Все приложения',

@@ -1130,11 +1130,13 @@ export interface ConnectionOperationTarget {
   server_errors?: CatalogServerError[] | null
   already_installed?: boolean | null
   upstream_repo?: string | null
+  configuration_updated?: boolean | null
+  reload_required?: boolean | null
 }
 export type ConnectionTargetKind = 'connector' | 'mcp' | 'plugin' | 'skill'
-export type ConnectionTargetAction = 'authorize' | 'connect' | 'enable' | 'install' | 'reconnect'
+export type ConnectionTargetAction = 'authorize' | 'connect' | 'enable' | 'install' | 'reconnect' | 'update'
 /** ``tools/connectors/contract.py::TargetState``. */
-export type ConnectionTargetState = 'pending' | 'initiated' | 'connected' | 'skipped' | 'failed' | 'expired' | 'not_connected'
+export type ConnectionTargetState = 'pending' | 'initiated' | 'connected' | 'updated' | 'skipped' | 'failed' | 'expired' | 'not_connected'
 /** One credential an MCP install still needs; the card renders a field per entry and sends the values back with the approval. */
 export interface ConnectionTargetEnvField {
   name: string

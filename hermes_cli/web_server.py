@@ -37,7 +37,6 @@ PROJECT_ROOT = Path(project_root_str())
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from hermes_constants import WEBAPP_ATTACHMENT_MAX_BYTES
 from hermes_cli.config import load_config
 from hermes_cli.version_info import get_version_info
 
@@ -665,7 +664,6 @@ elif _GATEWAY_HEALTH_TIMEOUT > _GATEWAY_HEALTH_TIMEOUT_MAX:
 
 
 _MANAGED_FILE_MAX_BYTES = 100 * 1024 * 1024
-_FS_DATA_URL_MAX_BYTES = WEBAPP_ATTACHMENT_MAX_BYTES
 # Multipart uploads stream to a temp file in fixed chunks and rename into
 # place: constant memory, no base64 inflation, no proxy body-size 502s (NS-501).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024

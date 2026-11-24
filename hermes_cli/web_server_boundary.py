@@ -22,8 +22,8 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({"localhost", "127.0.0.1", "::1"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 
 # Desktop file.attach sends a whole base64 data URL in one JSON-RPC frame;
-# uvicorn's 16 MiB default rejects files under the 256 MiB raw attach cap.
-_DESKTOP_ATTACHMENT_WS_MAX_BYTES = 384 * 1024 * 1024
+# let the attachment handler decide whether to limit the decoded file.
+_DESKTOP_ATTACHMENT_WS_MAX_BYTES = None
 
 
 def _dashboard_public_hosts() -> frozenset[str]:

@@ -1,6 +1,7 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const zhConnectorCard: TranslationOverrides['connectors'] = {
+  updated: '已更新',
   title: '连接你的应用',
   connect: '连接',
   skip: '暂不连接',

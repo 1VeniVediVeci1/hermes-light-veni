@@ -931,12 +931,13 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill, request: R
 
 
 @manage_router.patch("/api/sessions/{session_id}")
-async def rename_session_endpoint(session_id: str, body: SessionRename, request: Request):
+async def rename_session_endpoint(session_id: str, body: SessionRename, request: Request,
+                                  profile: Optional[str] = None):
     """Title and sidebar flags share one authoritative revision and receipt."""
     from hermes_cli.web_server_sessions import _mutate_session_request
     payload = {key: getattr(body, key) for key in ('title', 'archived', 'hidden', 'pinned', 'unread')
                if getattr(body, key) is not None}
-    return await _mutate_session_request(request, body.profile, session_id,
+    return await _mutate_session_request(request, body.profile or profile, session_id,
         request_id=body.request_id, expected_revision=body.expected_revision,
         expected_generation=body.expected_generation, operation='sidebar', payload=payload)
 

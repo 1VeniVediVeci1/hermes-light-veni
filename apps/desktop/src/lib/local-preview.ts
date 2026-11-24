@@ -13,9 +13,6 @@ import type { PreviewTarget } from '@/store/preview'
 const HTML_EXTENSIONS = new Set(['.htm', '.html'])
 const IMAGE_EXTENSIONS = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp'])
 const PDF_EXTENSIONS = new Set(['.pdf'])
-// Mirrors `_FS_DATA_URL_MAX_BYTES` in the backend filesystem endpoint.
-const REMOTE_HTML_PREVIEW_MAX_BYTES = 16 * 1024 * 1024
-const REMOTE_HTML_PREVIEW_MAX_BASE64_BYTES = Math.ceil(REMOTE_HTML_PREVIEW_MAX_BYTES / 3) * 4
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
   '.c': 'c',
@@ -144,14 +141,14 @@ export function validatedRemoteHtmlDataUrl(value: string): string | null {
 
   const payload = value.slice(prefix.length)
 
-  if (payload.length > REMOTE_HTML_PREVIEW_MAX_BASE64_BYTES || payload.length % 4 !== 0) {
+  if (payload.length % 4 !== 0) {
     return null
   }
 
   try {
     const decoded = atob(payload)
 
-    return decoded.length <= REMOTE_HTML_PREVIEW_MAX_BYTES && btoa(decoded) === payload ? value : null
+    return btoa(decoded) === payload ? value : null
   } catch {
     return null
   }
@@ -302,7 +299,7 @@ async function enrichPreviewTarget(target: PreviewTarget | null, scope?: Desktop
       binary: result.binary,
       byteSize: result.byteSize,
       language: result.language || target.language,
-      large: (result.byteSize ?? 0) > 512 * 1024,
+      large: false,
       mimeType: result.mimeType
     }
   } catch {

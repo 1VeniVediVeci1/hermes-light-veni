@@ -39,11 +39,11 @@ from tools.process_registry_checkpoint import ProcessCheckpointMixin
 from tools.process_registry_env_scope import ProcessEnvScopeMixin
 from tools.process_registry_output_log import ProcessOutputLogMixin, open_output_log, record_exit_command, worker_output_log
 from tools.process_registry_ownership import ProcessOwnershipMixin
+from tools.process_registry_consumption import CompletionConsumptionMixin
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import fallback_exit_code, log_delta_command, parse_log_delta_reply
 from tools.process_registry_wsl import _is_wsl_launcher_command
-from tools.process_registry_wait import max_wait_timeout, process_deadline_floor
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,10 @@ def _checkpoint_path() -> Path:
     return get_hermes_home() / "processes.json"
 
 MAX_OUTPUT_CHARS = 200_000      # rolling output buffer
+# ``process_manage wait`` observes a process, it is not the foreground command budget: its own
+# default and cap, independent of TERMINAL_TIMEOUT and of the agent turn / subagent waits.
+DEFAULT_WAIT_TIMEOUT = 300
+MAX_WAIT_TIMEOUT = 1800
 # Tail of the output a completion notification carries. Right for a build log; a spawner whose
 # output IS the payload (a bot DM's reply) asks for more per process (completion_output_chars).
 COMPLETION_OUTPUT_CHARS = 2000
@@ -548,6 +552,7 @@ class ProcessSession:
     sandbox_key: str = ""                       # hosted agent whose sandbox it runs in ("" = local activity);
                                                 # only that agent's scope can see it (sandbox_scope)
     session_key: str = ""                       # Gateway session key (reset protection)
+    profile_home: str = ""                      # Exact spawning profile, not the launch profile
     pid: Optional[int] = None
     process: Optional[subprocess.Popen] = None  # Popen handle (local only)
     env_ref: Any = None                         # Environment object (sandbox spawns)
@@ -654,7 +659,7 @@ _WATCHER_ROUTE_KEYS = ("platform", "chat_id", "user_id", "user_name", "thread_id
 # ``session_id``; ``command`` is redacted and ``owner_task_id`` defaulted on write).
 _CHECKPOINT_FIELDS = (
     "command", "pid", "pid_scope", "host_start_time", "systemd_unit", "wsl_chain", "cwd",
-    "started_at", "task_id", "owner_task_id", "session_key",
+    "started_at", "task_id", "owner_task_id", "session_key", "profile_home",
     *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "notify_on_complete", "completion_output_chars", "watch_patterns",
     "heartbeat_seconds", "persist_on_release", "output_log")
@@ -672,7 +677,7 @@ _WSL_CHAIN_NOTE = (
 )
 
 
-class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessEnvScopeMixin):
+class ProcessRegistry(CompletionConsumptionMixin, ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOutputLogMixin, ProcessOwnershipMixin, ProcessEnvScopeMixin):
     """In-memory registry of running and finished background processes.
     Thread-safe: accessed from executor threads (terminal_tool, process handlers),
     the gateway asyncio loop (watchers, reset checks) and the cleanup thread."""
@@ -704,6 +709,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         # Completions the agent already consumed via wait()/read_log() (output in
         # hand): drain loops AND gateway/tui watchers skip them.
         self._completion_consumed: set = set()
+        self._completion_claims: dict = {}
+        self._completion_pending_routes: dict = {}
         # Sessions merely *observed* exited via poll(). poll() is read-only and must NOT
         # mark consumed (a status check would suppress the watcher's autonomous delivery
         # turn), but the CLI has the poll result inline in the same turn, so
@@ -1087,11 +1094,13 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
     @staticmethod
     def _new_session(command, task_id, owner_task_id, session_key, cwd, **extra) -> ProcessSession:
         from gateway.session_context import get_session_env
+        from hermes_constants import hermes_home_key
         from tools.environments.sandbox_scope import current_sandbox_key
 
         return ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
             owner_task_id=owner_task_id, session_key=session_key, cwd=cwd, sandbox_key=current_sandbox_key(),
+            profile_home=hermes_home_key(),
             parent_session_id=get_session_env("HERMES_SESSION_ID", ""),
             wsl_chain=_is_wsl_launcher_command(command),
             started_at=time.time(), **extra)
@@ -1587,6 +1596,8 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 # Stable producer identity across checkpoint recovery (unlike a
                 # consumer-observed completion timestamp).
                 "started_at": session.started_at,
+                "process_home": session.profile_home,
+                "parent_session_id": session.parent_session_id,
             }
             _redact_process_result(notification)
             self.completion_queue.put(notification)
@@ -1644,8 +1655,10 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 and reader is not None and reader.is_alive())
 
     def is_completion_consumed(self, session_id: str) -> bool:
-        """True once wait/log/kill/acked poll consumed it; keyed by the full id, never a short prefix."""
-        return session_id in self._completion_consumed
+        """True once wait/log/kill/acked poll or an automatic claim owns it; keyed by the full id, never a short prefix.
+        Ownership, not mere admission."""
+        with self._lock:
+            return session_id in self._completion_consumed
 
     def is_session_waiting(self, session_id: str) -> bool:
         """Whether a goal loop (``hermes_cli.goals`` wait barrier) should stay parked on
@@ -2007,7 +2020,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             if not finalizing:
                 self._poll_observed.add(session.id)
                 if acknowledge:
-                    self._completion_consumed.add(session.id)
+                    self._mark_completion_consumed(session.id)
         if session.detached and not session.output_log:
             result.update(detached=True, note="Process recovered after restart -- output history unavailable")
         return result
@@ -2039,23 +2052,24 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             **self._status_head(session), "output": "\n".join(selected),
             "total_lines": total_lines, "showing": f"{len(selected)} lines"}
         if exited and observed_completion_output and not finalizing:
-            self._completion_consumed.add(session.id)
+            self._mark_completion_consumed(session.id)
         return result
 
     def wait(self, session_id: str, timeout: int | None = None) -> dict:
         """Block until the process exits, the timeout elapses, the user interrupts, or a
         mid-turn user message (steer/redirect → ``request_yield``) releases the wait.
-        ``timeout`` defaults to (and is clamped by) TERMINAL_TIMEOUT. Returns a dict
+        ``timeout`` defaults to 300 seconds (maximum 1800), independently of
+        the foreground TERMINAL_TIMEOUT. Returns a dict
         with status exited|timeout|interrupted|not_found|error and an output snapshot."""
         from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
 
-        max_timeout = max_wait_timeout()
+        max_timeout = MAX_WAIT_TIMEOUT
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is
         # falsy and would silently fall through to the default wait.
         if timeout is not None and timeout <= 0:
             return {"status": "error", "error": f"timeout must be positive (got {timeout})"}
         timeout_note = None
-        effective_timeout = timeout or max_timeout
+        effective_timeout = timeout or DEFAULT_WAIT_TIMEOUT
         if timeout and timeout > max_timeout:
             effective_timeout = max_timeout
             timeout_note = f"Requested wait of {timeout}s was clamped to configured limit of {max_timeout}s"
@@ -2070,7 +2084,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             self._reconcile_local_exit(session)  # orphaned-pipe reader guard
             result = None
             if session.exited and not self._reader_finalizing(session):
-                self._completion_consumed.add(session.id)
+                self._mark_completion_consumed(session.id)
                 result = self._exit_snapshot(session, "exited")
             elif _is_interrupted():
                 result = {
@@ -2146,7 +2160,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             # Only suppress the autonomous turn after its output is present in
             # the explicit kill result, matching wait/log consumption.
             if consume_output and not finalizing:
-                self._completion_consumed.add(session.id)
+                self._mark_completion_consumed(session.id)
             return result
         try:
             early = self._signal_kill(session, consume_output)
@@ -2195,7 +2209,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
             with session._lock:
                 output = _completion_output(session)
                 if consume_output:
-                    self._completion_consumed.add(session.id)
+                    self._mark_completion_consumed(session.id)
                 session.exited = True
                 session.exit_code = -15  # SIGTERM
                 session.completion_reason = "killed"
@@ -2251,7 +2265,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
                 with session._lock:
                     output = _completion_output(session)
                 if consume_output:
-                    self._completion_consumed.add(session.id)
+                    self._mark_completion_consumed(session.id)
                 # No waitable handle, so this is not a collected exit. Close the
                 # entry without queueing a completion, and do not signal a PID
                 # whose start time does not match.
@@ -2553,13 +2567,30 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         # Belt-and-suspenders against module-lifetime growth: forget consumed /
         # poll-observed marks for any session no longer tracked at all.
         tracked = self._running.keys() | self._finished.keys()
-        self._completion_consumed &= tracked
+        retained = tracked | self._completion_pending_routes.keys()
+        self._completion_consumed &= retained
+        self._completion_claims = {sid: claim for sid, claim in self._completion_claims.items() if sid in retained}
         self._poll_observed &= tracked
 
 
 
 
 process_registry = ProcessRegistry()
+
+
+def _process_deadline_floor(args: dict) -> float | None:
+    """Only ``wait`` blocks: its effective window (see ``ProcessRegistry.wait``), so the executor's
+    generic deadline clears it and the wait's own timeout fires first."""
+    if args.get("action") != "wait":
+        return None
+    requested = args.get("timeout")
+    if requested is None:
+        return float(DEFAULT_WAIT_TIMEOUT)
+    try:
+        requested = float(requested)
+    except (TypeError, ValueError):
+        return float(DEFAULT_WAIT_TIMEOUT)
+    return min(requested, float(MAX_WAIT_TIMEOUT)) if requested > 0 else None
 
 
 # --- the "process_manage" tool schema + handler -----------------------------------
@@ -2709,5 +2740,5 @@ registry.register(
     schema=PROCESS_SCHEMA,
     handler=_handle_process,
     emoji="⚙️",
-    deadline_floor=process_deadline_floor,
+    deadline_floor=_process_deadline_floor,
 )

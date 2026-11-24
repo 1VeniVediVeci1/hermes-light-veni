@@ -413,7 +413,7 @@ class PreparedCompaction:
             scan = worker._scan_window_handoffs(working, start, end, working[start:end])
             if scan.tail_start != end:
                 return None  # a handoff inside the protected tail: leave it to compress()
-            turns = scan.turns_to_summarize
+            turns = worker._with_source_tool_bodies(scan.turns_to_summarize, messages)
             if not turns:
                 return None
             focus = worker._derive_auto_focus_topic(working)

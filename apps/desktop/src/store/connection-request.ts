@@ -186,12 +186,13 @@ const TARGET_STATES: readonly ConnectionTargetState[] = [
   'failed',
   'initiated',
   'not_connected',
+  'updated',
   'pending',
   'skipped'
 ]
 
 const KINDS: readonly ConnectionTargetKind[] = ['connector', 'mcp', 'plugin', 'skill']
-const ACTIONS: readonly ConnectionTargetAction[] = ['authorize', 'connect', 'enable', 'install', 'reconnect']
+const ACTIONS: readonly ConnectionTargetAction[] = ['authorize', 'connect', 'enable', 'install', 'reconnect', 'update']
 const SETTLE_REASONS: readonly ConnectionSettleReason[] = ['all_resolved', 'continue', 'deadline', 'interrupt']
 
 // The wire carries these as typed literals already; the lookups defend against a backend a version ahead.

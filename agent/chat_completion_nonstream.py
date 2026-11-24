@@ -26,6 +26,7 @@ class _NonStreamRequest:
         # (run_codex_stream._request_is_current). ``codex_retired`` mirrors it locally.
         self.codex_token = object() if agent.api_mode == "codex_responses" else None
         self.codex_retired = False
+        self.call_start = h.time.time()
         self.wd = h._resolve_nonstream_watchdogs(agent, api_kwargs)
         self.codex_watchdog_state = (
             h.SimpleNamespace(
@@ -33,16 +34,19 @@ class _NonStreamRequest:
                 lock=h.threading.Lock(),
                 last_event_ts=None,
                 last_progress_ts=None,
+                first_progress_ts=None,
                 retry_started_ts=None,
-                phase_aware=self.wd.idle_requires_progress,
+                phase_aware=True,
             )
             if self.codex_token is not None
             else None
         )
-        self.call_start = h.time.time()
         self.wait_notice_started_ts = None
         self.wait_notice = wn.WaitNoticeState()
         self.thread = None
+        self._finished = h.threading.Event()
+        self._lifecycle_lock = h.threading.RLock()
+        self.abort_hook = self._cancel_inline
 
     def _install_codex_request_token(self) -> None:
         if self.codex_token is not None and not self.codex_retired:  # retired before start: don't re-publish
@@ -62,7 +66,13 @@ class _NonStreamRequest:
             client = self.agent._create_request_anthropic_client(reason=reason)
         else:
             client = self.agent._create_request_openai_client(reason=reason, api_kwargs=self.api_kwargs)
-        return self.clients.set_client(client, kind=kind)
+        with self._lifecycle_lock:
+            self.clients.set_client(client, kind=kind)
+            if self.codex_retired or self.cancelled:
+                self._abort_request("interrupt_abort" if self.cancelled else "stale_call_kill")
+                raise InterruptedError("Agent interrupted before dispatch") if self.cancelled else TimeoutError(
+                    "Responses request retired before dispatch")
+        return client
 
     def _call(self):
         watchdog_state_var = watchdog_context_token = None
@@ -73,8 +83,13 @@ class _NonStreamRequest:
 
                 watchdog_state_var = _codex_watchdog_state_var
                 watchdog_context_token = watchdog_state_var.set(self.codex_watchdog_state)
-            self.result["response"] = h._dispatch_nonstreaming_api_request(
+            response = h._dispatch_nonstreaming_api_request(
                 self.agent, self.api_kwargs, make_client=self._make_client)
+            with self._lifecycle_lock:
+                if self.agent._interrupt_requested:
+                    raise InterruptedError("Agent interrupted during API call")
+                if not self.codex_retired and not self.cancelled:
+                    self.result["response"] = response
         except Exception as e:
             # Our own force-close caused this error: swallow it, the main
             # thread raises InterruptedError (#6600). Retirement logs at info
@@ -105,13 +120,16 @@ class _NonStreamRequest:
         """Watchdog/interrupt kill: abort the request client (kind-aware, #67142)
         and retire the codex token; the worker sees its own forced close via
         the cancel flags."""
+        # Fence late/EOF output before shutdown wakes the owner. Otherwise a fast
+        # EOF can publish a partial "completed" result before retirement reaches it.
+        self._retire_codex_request_token()
         with h.contextlib.suppress(Exception):
             self.clients.close_once(reason)
-        self._retire_codex_request_token()
 
     def _await_worker_after_kill(self, timeout_message: str) -> None:
         # Wait briefly for the worker to notice the closed connection.
-        self.thread.join(timeout=2.0)
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
         if self.result["error"] is None and self.result["response"] is None:
             self.result["error"] = TimeoutError(timeout_message)
 
@@ -165,13 +183,7 @@ class _NonStreamRequest:
                 phase = "reconnect"
             elif last_event_ts is not None:
                 phase = "post_event"
-            watchdog = wn.codex_watchdog_deadline(stale_timeout=wd.stale_timeout,
-                ttfb_enabled=wd.ttfb_enabled, ttfb_timeout=wd.ttfb_timeout,
-                last_event_ts=last_event_ts, last_progress_ts=last_progress_ts,
-                retry_started_ts=retry_started_ts,
-                call_start=self.call_start, idle_enabled=wd.idle_enabled, idle_timeout=wd.idle_timeout,
-                idle_requires_progress=wd.idle_requires_progress, progress_timeout=wd.progress_timeout,
-                elapsed=elapsed)
+            watchdog = self._deadline(elapsed)
             # One neutral notice per silence; repeating it every heartbeat made
             # healthy long calls read as provider trouble (#92550).
             if not self.wait_notice.should_emit(phase, watchdog):
@@ -245,12 +257,13 @@ class _NonStreamRequest:
         circuit breaker (#58962, see ``_stale_streak``)."""
         agent, wd = self.agent, self.wd
         silent_hint = h._codex_silent_hang_hint(agent, self.api_kwargs)
-        h._report_stale_nonstream_kill(agent, self.api_kwargs, elapsed, wd.stale_timeout, hint=silent_hint)
+        wall = self._wall_timeout(self._codex_watchdog_snapshot()[1])
+        h._report_stale_nonstream_kill(agent, self.api_kwargs, elapsed, wall, hint=silent_hint)
         self._abort_request("stale_call_kill")
         h._bump_stale_streak(agent)
         h._touch_stale_kill_activity(agent, elapsed)
         self._await_worker_after_kill(
-            f"Non-streaming API call timed out after {int(elapsed)}s with no response (threshold: {int(wd.stale_timeout)}s)"
+            f"Non-streaming API call timed out after {int(elapsed)}s with no response (threshold: {int(wall)}s)"
             + (f". {silent_hint}" if silent_hint else ""))
 
     def _interrupt(self, elapsed: float) -> None:
@@ -271,6 +284,8 @@ class _NonStreamRequest:
 
     def run(self):
         agent, wd = self.agent, self.wd
+        if self._enforce_watchdogs(h.time.time()):
+            raise self.result["error"]
         if wd.codex:
             # Reset before the worker starts so a marker left over from a previous
             # call on this agent can't be misread as the first event for this one.
@@ -291,23 +306,8 @@ class _NonStreamRequest:
             now = h.time.time()
             elapsed = now - self.call_start
             self._emit_wait_notice(elapsed, heartbeat=poll_count % 100 == 0)
-            last_event_ts, last_progress_ts, retry_started_ts, attempt_started_ts = self._codex_watchdog_snapshot()
-            attempt_elapsed = now - attempt_started_ts
-            if (wd.ttfb_enabled and last_event_ts is None and attempt_elapsed > wd.ttfb_timeout):
-                self._ttfb_kill(attempt_elapsed)
-                break
-            if (self._pre_progress(last_event_ts, last_progress_ts)
-                    and attempt_elapsed > wd.progress_timeout):
-                self._progress_kill(attempt_elapsed)
-                break
-            idle_elapsed = now - last_event_ts if last_event_ts is not None else None
-            if (retry_started_ts is None and wd.idle_enabled and idle_elapsed is not None
-                    and (not wd.idle_requires_progress or last_progress_ts is not None)
-                    and idle_elapsed > wd.idle_timeout):
-                self._idle_kill(idle_elapsed)
-                break
-            if elapsed > wd.stale_timeout:
-                self._stale_kill(elapsed)
+            if (self.result["response"] is None and self.result["error"] is None
+                    and self._enforce_watchdogs(now)):
                 break
             if agent._interrupt_requested:
                 self._interrupt(elapsed)
@@ -317,3 +317,96 @@ class _NonStreamRequest:
         if self.result["response"] is not None:
             h._reset_stale_streak(agent)
         return self.result["response"]
+
+    def _deadline(self, elapsed: float, *, include_expired: bool = False):
+        wd = self.wd
+        event, progress, retry, _ = self._codex_watchdog_snapshot()
+        return wn.codex_watchdog_deadline(stale_timeout=self._wall_timeout(progress),
+            ttfb_enabled=wd.ttfb_enabled, ttfb_timeout=wd.ttfb_timeout,
+            last_event_ts=event, last_progress_ts=progress, retry_started_ts=retry,
+            call_start=self.call_start, idle_enabled=wd.idle_enabled, idle_timeout=wd.idle_timeout,
+            idle_requires_progress=wd.idle_requires_progress, progress_timeout=wd.progress_timeout,
+            elapsed=elapsed, include_expired=include_expired)
+
+    def _wall_timeout(self, progress):
+        # A physical retry resets its first-event/progress clocks, not the request's
+        # successful handoff or absolute envelope.
+        state = self.codex_watchdog_state
+        if state is not None:
+            with state.lock:
+                first = getattr(state, "first_progress_ts", None)
+            if first is not None:
+                progress = first
+        return self.wd.wall_timeout(progress)
+
+    def _enforce_watchdogs(self, now: float) -> bool:
+        """Same deadline selection for worker, inline observer, and wait notices."""
+        if not self.wd.codex:
+            if now - self.call_start > self.wd.stale_timeout:
+                self._stale_kill(now - self.call_start)
+                return True
+            return False
+        deadline = self._deadline(now - self.call_start, include_expired=True)
+        if deadline is None or deadline[1] > 0:
+            return False
+        event, _, _, attempt = self._codex_watchdog_snapshot()
+        label = deadline[0]
+        if label == "TTFB":
+            self._ttfb_kill(now - attempt)
+        elif label == "first progress":
+            self._progress_kill(now - attempt)
+        elif label == "stream idle":
+            self._idle_kill(now - event)
+        else:
+            self._stale_kill(now - self.call_start)
+        return True
+
+    def _cancel_inline(self, reason: str) -> None:
+        with self._lifecycle_lock:
+            if self._finished.is_set():
+                return
+            self.cancelled = True
+            self._abort_request(reason)
+            self.result["error"] = InterruptedError("Agent interrupted during API call")
+
+    def _observe_inline(self) -> None:
+        polls = 0
+        while not self._finished.wait(0.1):
+            with self._lifecycle_lock:
+                if self._finished.is_set() or self.cancelled or self.codex_retired:
+                    return
+                now = h.time.time()
+                if self.agent._interrupt_requested:
+                    self._cancel_inline("interrupt_abort")
+                    return
+                if self._enforce_watchdogs(now):
+                    return
+                polls += 1
+                self._emit_wait_notice(now - self.call_start, heartbeat=polls % 150 == 0)
+
+    def run_inline(self):
+        """Only the observer is threaded; SDK dispatch/consumption/close stay on the caller."""
+        if self._enforce_watchdogs(h.time.time()):
+            raise self.result["error"]
+        hard_timeout = h._inline_nonstream_hard_timeout(self.wd.total_timeout)
+        if hard_timeout is not None and "timeout" not in self.api_kwargs:
+            self.api_kwargs = {**self.api_kwargs, "timeout": hard_timeout}
+        self.agent._active_request_abort = self.abort_hook
+        self.agent._touch_activity("waiting for non-streaming API response")
+        observer = h.threading.Thread(target=h._context_thread_target(self._observe_inline),
+            name="responses-inline-watchdog", daemon=True)
+        observer.start()
+        try:
+            self._call()
+            if self.agent._interrupt_requested or self.cancelled:
+                raise InterruptedError("Agent interrupted during API call")
+            if self.result["error"] is not None:
+                raise self.result["error"]
+            h._reset_stale_streak(self.agent)
+            return self.result["response"]
+        finally:
+            with self._lifecycle_lock:
+                self._finished.set()
+            observer.join(timeout=2.0)
+            if getattr(self.agent, "_active_request_abort", None) is self.abort_hook:
+                self.agent._active_request_abort = None

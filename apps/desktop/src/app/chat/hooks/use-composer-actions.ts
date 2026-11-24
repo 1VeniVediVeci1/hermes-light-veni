@@ -89,8 +89,8 @@ async function queuedAttachmentPreview(filePath: string): Promise<{ previewUrl: 
 
 /**
  * Prefer a cheap object-URL preview when the drop/paste still has a Blob/File
- * handle. `readFileDataUrl` base64-loads the whole file over IPC (capped at
- * 16 MB) and was freezing Desktop on Windows Explorer image drops (#63682).
+ * handle. Base64-loading the whole file over IPC could freeze Desktop on
+ * Windows Explorer image drops (#63682).
  * Object URLs skip that read; path-only attaches (paperclip) still fall back
  * to the IPC data-URL path.
  */
@@ -780,7 +780,7 @@ export function useComposerActions({
           return false
         }
 
-        // Over savePastedText's cap: drop it after the toast, as an attachable chat does.
+        // No attachment route here: avoid putting oversized text into the editor.
         notifyError(new Error(`Pasted text is too large (${pasteSizeLabel(text)})`), copy.pasteAttachFailed)
 
         return true
@@ -807,8 +807,7 @@ export function useComposerActions({
       } catch (err) {
         notifyError(err, copy.pasteAttachFailed)
 
-        // IPC rejections lose `code`, so match the main-process cap's message. The browser bridge's
-        // 16 MiB refusal says "larger than" and still falls back to inline insertion, as on main.
+        // Older shells and gateways may still reject a paste by size. Don't inline it in that case.
         return /too large/i.test(err instanceof Error ? err.message : String(err))
       }
     },

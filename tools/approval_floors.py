@@ -17,7 +17,8 @@ from tools import approval_context as _ctx
 from tools.approval_ansi_c import expand_ansi_c_quotes
 from utils import unlink_files_older_than
 from tools.approval_detection import (
-    _FALLBACK_MATCH_SUFFIX, _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _deny_command_variants)
+    _FALLBACK_MATCH_SUFFIX, _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _deny_command_variants,
+    detect_hardline_command)
 
 logger = logging.getLogger("tools.approval")
 
@@ -42,6 +43,42 @@ def _match_user_deny_rule(command: str) -> str | None:
             if fnmatch.fnmatchcase(candidate, pattern.lower()):
                 return pattern
     return None
+
+
+def _match_hardline_allow_rule(command: str) -> str | None:
+    """Return the matching ``approvals.hardline_allow`` glob, or None.
+
+    The operator's opt-out from a hardline CLASS on a machine they own (``shutdown`` on a
+    desktop the agent is expected to reboot, for example). Matched over the same
+    normalized/deobfuscated variants as ``approvals.deny``, so quoting tricks cannot sidestep
+    it either. Only consulted once a hardline rule already matched, so a broad glob cannot
+    quietly allow unrelated commands."""
+    try:
+        allow_patterns = _ctx._get_approval_config().get("hardline_allow") or []
+    except Exception:
+        return None
+    globs = [p.strip() for p in allow_patterns if isinstance(p, str) and p.strip()]
+    if not globs:
+        return None
+    for command_variant in _deny_command_variants(command):
+        candidate = command_variant.lower().strip()
+        for pattern in globs:
+            if fnmatch.fnmatchcase(candidate, pattern.lower()):
+                return pattern
+    return None
+
+
+def hardline_verdict(command: str) -> tuple:
+    """``detect_hardline_command`` minus the classes ``approvals.hardline_allow`` exempts.
+
+    Returns ``(blocked, description, allow_pattern)``. An exempted command returns
+    ``(False, description, pattern)`` so callers can still log what was let through and the
+    description stays available for a non-exempt block message."""
+    is_hardline, description = detect_hardline_command(command)
+    if not is_hardline:
+        return (False, description, None)
+    pattern = _match_hardline_allow_rule(command)
+    return (False, description, pattern) if pattern is not None else (True, description, None)
 
 
 def _user_deny_block_result(pattern: str) -> dict:

@@ -84,6 +84,7 @@ export const zhHantOverrides = {
     back: '返回結果'
   },
   connectors: {
+    updated: '已更新',
     directory: {
       suggested: '推薦',
       allApps: '全部應用程式',

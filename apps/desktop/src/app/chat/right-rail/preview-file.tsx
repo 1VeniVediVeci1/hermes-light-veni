@@ -22,7 +22,7 @@ import { chunkTextLines, useFixedRowWindow } from '@/components/chat/fixed-row-w
 import { LazyShiki as ShikiHighlighter } from '@/components/chat/shiki-highlighter'
 import { PageLoader } from '@/components/page-loader'
 import { Tip } from '@/components/ui/tooltip'
-import { translateNow, useI18n } from '@/i18n'
+import { useI18n } from '@/i18n'
 import {
   desktopFileDiff,
   DesktopFileMissingError,
@@ -55,7 +55,6 @@ import { $connection, $currentCwd } from '@/store/session'
 import { notifyWorkspaceChanged } from '@/store/workspace-events'
 
 const SHIKI_THEME = { dark: 'github-dark-default', light: 'github-light-default' } as const
-const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 const SOURCE_CHUNK_LINES = 200
 const SOURCE_LINE_PX = 20
 const SOURCE_OVERSCAN_LINES = 400
@@ -165,7 +164,6 @@ export function PreviewEmptyState({
 
 interface LocalPreviewState {
   binary?: boolean
-  byteSize?: number
   dataUrl?: string
   /** Working-tree-vs-HEAD unified diff, when the file has uncommitted changes. */
   diff?: string
@@ -204,23 +202,6 @@ function filePathForTarget(target: PreviewTarget) {
   }
 
   return fileUrlToNativePath(target.url) ?? target.url
-}
-
-function formatBytes(bytes: number | undefined) {
-  if (!bytes) {
-    return translateNow('preview.unknownSize')
-  }
-
-  const units = ['B', 'KB', 'MB', 'GB']
-  let value = bytes
-  let unit = 0
-
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-
-  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
 }
 
 function looksBinaryBytes(bytes: Uint8Array) {
@@ -807,7 +788,7 @@ export function LocalFilePreview({
   // when the file is forcibly previewed past the binary refusal screen.
   const isText = target.previewKind === 'text' || target.previewKind === 'binary' || target.previewKind === 'html'
 
-  const blockedByTarget = !isImage && !isPdf && !forcePreview && (target.binary || target.large)
+  const blockedByTarget = !isImage && !isPdf && !forcePreview && target.binary
 
   useEffect(() => {
     let active = true
@@ -843,11 +824,10 @@ export function LocalFilePreview({
         const result = await readTextPreview(filePath, sessionId)
 
         if (active) {
-          const shouldBlock = !forcePreview && (result.binary || (result.byteSize ?? 0) > TEXT_PREVIEW_MAX_BYTES)
+          const shouldBlock = !forcePreview && result.binary
 
           setState({
             binary: result.binary,
-            byteSize: result.byteSize,
             language: result.language || target.language || 'text',
             loading: false,
             text: shouldBlock ? undefined : result.text,
@@ -942,7 +922,7 @@ export function LocalFilePreview({
   }, [isPdf, state.dataUrl])
 
   // Editing is only offered for whole, readable text — never images, binaries,
-  // or files we only loaded the first 512 KB of (saving would drop the tail).
+  // or truncated responses from older servers (saving would drop the tail).
   const canEdit =
     isText && !isImage && !blockedByTarget && state.text !== undefined && !state.truncated && !state.binary
 
@@ -1160,20 +1140,12 @@ export function LocalFilePreview({
     return <PreviewEmptyState body={pdfError} primaryAction={closeAction} title={t.preview.unavailable} />
   }
 
-  if (
-    !isImage &&
-    !isPdf &&
-    !forcePreview &&
-    (target.binary || target.large || state.binary || (state.byteSize ?? 0) > TEXT_PREVIEW_MAX_BYTES)
-  ) {
-    const binary = target.binary || state.binary
-    const size = target.byteSize || state.byteSize
-
+  if (!isImage && !isPdf && !forcePreview && (target.binary || state.binary)) {
     return (
       <PreviewEmptyState
-        body={binary ? t.preview.binaryBody(target.label) : t.preview.largeBody(target.label, formatBytes(size))}
+        body={t.preview.binaryBody(target.label)}
         primaryAction={{ label: t.preview.previewAnyway, onClick: () => setForcePreview(true) }}
-        title={binary ? t.preview.binaryTitle : t.preview.largeTitle}
+        title={t.preview.binaryTitle}
         tone="warning"
       />
     )

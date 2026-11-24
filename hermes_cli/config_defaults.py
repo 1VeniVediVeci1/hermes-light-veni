@@ -60,6 +60,10 @@ DEFAULT_CONFIG = {
     # a remote (ssh) workspace keeps the profile home dir either way.
     "attachments": {
         "storage": "hermes-home",
+        # Size cap for one attachment across browser uploads, staged-upload redemption, inline
+        # file.attach data URLs and image.attach_bytes (hermes_cli/attachment_limits.py).
+        # null = each route's built-in cap; 0 = no cap; positive int = that many bytes.
+        "max_bytes": None,
     },
     "agent": {
         # Turn cap. null = unlimited (default; caps caused silent mid-task truncation). Positive int
@@ -1635,6 +1639,10 @@ DEFAULT_CONFIG = {
         # Case-insensitive fnmatch globs against terminal commands; a match blocks even under --yolo / mode=off.
         # Quote in YAML when starting with * or containing {}/!/: e.g. "git push --force*".
         "deny": [],
+        # Case-insensitive fnmatch globs that EXEMPT a matching command from the hardline blocklist
+        # (the always-on floor below --yolo), e.g. "*shutdown*" to let the agent reboot this host.
+        # Only consulted once a hardline rule already matched; everything else stays hardline.
+        "hardline_allow": [],
         # Who may answer a chat approval/slash confirm/clarify: ["*"] any admitted member; [] requester + admins (+ ids).
         "approvers": ["*"],
         # /reload-mcp confirms before rebuilding the MCP tool set (it invalidates the prompt cache). "Always Approve" → false.

@@ -477,10 +477,11 @@ def _approval_identity(command: str) -> tuple:
     runtime self-delete, the user's deny rules and the permanent allowlist."""
     from agent.runtime_self_protection import command_deletes_runtime
     from tools.approval import _command_matches_permanent_allowlist, _match_user_deny_rule
+    from tools.approval_floors import hardline_verdict
     from tools.approval_detection import (
-        _check_sudo_stdin_guard, detect_dangerous_command, detect_hardline_command, hardline_scan_incomplete)
+        _check_sudo_stdin_guard, detect_dangerous_command, hardline_scan_incomplete)
     return (
-        tuple(detect_hardline_command(command)),
+        tuple(hardline_verdict(command)[:2]),
         hardline_scan_incomplete(command),
         tuple(detect_dangerous_command(command)),
         tuple(_check_sudo_stdin_guard(command)),

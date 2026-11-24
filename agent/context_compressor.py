@@ -3224,9 +3224,18 @@ class ContextCompressor(
         soft_ceiling = self._tail_soft_ceiling(protect_tail_tokens)
         demote_end = len(result) - min(_PRESSURE_KEEP_RECENT_MESSAGES, len(result))
         start = max(0, prune_boundary)
+        # Price the region the way the tail walk does (#84371). Charging stale thinking the wire never
+        # carries kept the region over the ceiling however many bodies were demoted (reasoning is not
+        # demotable), so every tail tool result became a one-line receipt.
+        native_prices = self._native_anthropic_budget()
 
         def _protected_region_tokens() -> int:
-            return sum(_estimate_msg_budget_tokens(result[i]) for i in range(start, len(result)))
+            # The native route prices the whole list at once and a demotion rewrites rows in place, so it is
+            # re-priced per call; the generic pricer reads ``result[i]`` lazily.
+            if native_prices:
+                return sum(native_prices(result)[start:])
+            price = self._tail_row_pricer(result)
+            return sum(price(i) for i in range(start, len(result)))
 
         demoted = 0
 
@@ -5309,7 +5318,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         if getattr(self, "tail_mode", "lean") == "lean":
             messages = self._demote_stale_tail_tools(messages, compress_end)
         scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
-        turns_to_summarize = scan.turns_to_summarize
+        turns_to_summarize = scan.turns_to_summarize = self._with_source_tool_bodies(
+            scan.turns_to_summarize, canonical_messages)
         self._record_compression_regions(
             head_messages=messages[:compress_start], middle_messages=turns_to_summarize, tail_messages=messages[compress_end:],
         )

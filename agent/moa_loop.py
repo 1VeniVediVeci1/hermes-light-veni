@@ -257,7 +257,8 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
     # hermes_home_key() in the key: the resolved api_key/base_url are per-profile, and under a
     # multiplex gateway two profiles can share (provider, model) with different accounts.
     from hermes_constants import hermes_home_key
-    cache_key = (hermes_home_key(), provider, model)
+    from hermes_cli.route_controls import route_policy_fingerprint
+    cache_key = (hermes_home_key(), provider, model, route_policy_fingerprint(provider, model=model))
     now = time.monotonic()
     with _runtime_cache_lock:
         entry = _runtime_cache.get(cache_key)
@@ -267,7 +268,7 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         rt = resolve_runtime_provider(requested=provider, target_model=model)
-        out.update({k: rt[k] for k in ("base_url", "api_key", "api_mode") if rt.get(k)})
+        out.update({k: rt[k] for k in ("base_url", "api_key", "api_mode", "streaming") if rt.get(k) is not None})
         overrides = rt.get("request_overrides")
         extra_body = overrides.get("extra_body") if isinstance(overrides, dict) else None
         if isinstance(extra_body, dict) and extra_body:
@@ -963,7 +964,8 @@ def aggregate_moa_context(
     )
 
     agg_label = _slot_label(aggregator)
-    agg_runtime = _slot_runtime(aggregator)
+    agg_runtime = dict(_slot_runtime(aggregator))
+    agg_runtime.pop("streaming", None)
     _touch_fanout_progress(
         agent, f"MoA: synthesizing aggregator guidance ({agg_label})"
     )
@@ -1008,13 +1010,15 @@ def _completed_response_as_stream_chunk(response: Any) -> Any:
         ]
     delta = SimpleNamespace(
         content=getattr(message, "content", None), tool_calls=tool_call_deltas,
-        **{k: getattr(message, k, None) for k in ("reasoning_content", "reasoning", "reasoning_details")},
+        **{k: getattr(message, k, None) for k in ("reasoning_content", "reasoning", "reasoning_details", "stop_details")},
     )
     choice = SimpleNamespace(
         index=getattr(first_choice, "index", 0), delta=delta, finish_reason=getattr(first_choice, "finish_reason", None) or "stop",
     )
     return SimpleNamespace(
         id=getattr(response, "id", None), model=getattr(response, "model", None), choices=[choice], usage=getattr(response, "usage", None),
+        # Native Messages stop reason (``refusal``) for the loop's refusal diagnostics.
+        stop_reason=getattr(response, "stop_reason", None),
     )
 
 

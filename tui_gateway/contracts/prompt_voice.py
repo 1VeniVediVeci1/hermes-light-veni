@@ -140,7 +140,7 @@ method("image.attach_bytes", params=ImageAttachBytesParams, result=AttachedImage
 
 class PdfAttachParams(SessionParams):
     """Host ``path`` or base64 ``content_base64`` / ``data``; ``first_page`` / ``last_page`` bound the
-    render (per-call page cap enforced server-side)."""
+    render (omitting ``last_page`` renders through the end)."""
 
     path: str | None = None
     content_base64: str | None = None

@@ -146,8 +146,7 @@ export async function resolveMediaDisplaySrc(path: string, owner?: OwnerScope): 
   }
 
   // An explicit local owner is this device, even with a remote foreground.
-  // Keep the native reader and its configured size cap; the backend preview
-  // endpoint has a separate fixed limit. A browser page's local connection is
+  // A browser page's local connection is
   // the serving backend instead, whose bridge reads follow the foreground
   // profile; it takes the owner-pinned read below.
   if (

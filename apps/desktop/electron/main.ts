@@ -293,12 +293,8 @@ import { windowsGitCandidates } from './git-binary-candidates'
 import { registerGitIpc } from './git-ipc'
 import {
   assertExistingPathForOpen,
-  ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
-  clampDataUrlReadMaxMb,
   composerImageBufferFromIpc,
   composerPasteTextFromIpc,
-  DATA_URL_READ_DEFAULT_MAX_MB,
-  dataUrlReadMaxBytesFromMb,
   DEFAULT_FETCH_TIMEOUT_MS,
   enableBasicPasswordStoreEncryption,
   encryptDesktopSecret as encryptDesktopSecretStrict,
@@ -312,7 +308,6 @@ import {
   resolveRequestedPathForIpc,
   resolveTimeoutMs,
   SAFE_STORAGE_ENCODING,
-  TEXT_PREVIEW_SOURCE_MAX_BYTES,
   tightenSecretFileMode,
   writeSecretFileAtomic
 } from './hardening'
@@ -456,6 +451,7 @@ import { joinPrimaryBoot, primaryBootRequest, primaryDialClaimKey, primaryProfil
 import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { PrimaryProfilePin, resolveLaunchProfile } from './primary-profile-pin'
 import { connectPrimaryRemote } from './primary-remote-startup'
+import { scheduleLightSelfUpdate } from './light-self-update'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import {
   assertLocalProfileCanStart,
@@ -1675,7 +1671,6 @@ const MEDIA_MIME_TYPES = {
 const PREVIEW_HTML_EXTENSIONS = new Set(['.html', '.htm'])
 const PREVIEW_PDF_EXTENSIONS = new Set(['.pdf'])
 const PREVIEW_WATCH_DEBOUNCE_MS = 120
-const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 
 const PREVIEW_LANGUAGE_BY_EXT = {
   '.c': 'c',
@@ -1759,7 +1754,7 @@ function previewFileMetadata(filePath, mimeType) {
   return {
     binary,
     byteSize,
-    large: byteSize > TEXT_PREVIEW_MAX_BYTES
+    large: false
   }
 }
 
@@ -5212,7 +5207,7 @@ function fetchJson(url, token, options: any = {}) {
         const parsed = new URL(url)
         const client = parsed.protocol === 'https:' ? https : http
         const agent = jsonAgentFor(parsed.protocol)
-        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+        const timeoutMs = options.timeoutMs === 0 ? 0 : resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
@@ -5290,9 +5285,11 @@ function fetchJson(url, token, options: any = {}) {
         )
 
         req.on('error', reject)
-        req.setTimeout(timeoutMs, () => {
-          req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-        })
+        if (timeoutMs > 0) {
+          req.setTimeout(timeoutMs, () => {
+            req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+          })
+        }
 
         // From here the request goes on the wire: a later transport error can no
         // longer prove the server didn't process it, so non-idempotent verbs must
@@ -7228,8 +7225,11 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
         return
       }
 
-      const body = serializeJsonBody(options.body)
-      const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+      // Multipart uploads (remote chat attachments) ride the cookie leg too:
+      // a password-gated gateway has no native bearer (local change).
+      const multipart = options.upload ? multipartBody(options.upload) : null
+      const body = multipart ? multipart.body : serializeJsonBody(options.body)
+      const timeoutMs = options.timeoutMs === 0 ? 0 : resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
       const request = electronNet.request({
         method: options.method || 'GET',
@@ -7239,7 +7239,11 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
         redirect: 'follow'
       } as any)
 
-      setJsonRequestHeaders(request)
+      if (multipart) {
+        request.setHeader('Content-Type', multipart.contentType)
+      } else {
+        setJsonRequestHeaders(request)
+      }
 
       const headerBag = { ...headersForRemoteRequest(url), ...(options.headers || {}) }
 
@@ -7257,17 +7261,19 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
 
       let timedOut = false
 
-      const timer = setTimeout(() => {
-        timedOut = true
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true
 
-        try {
-          request.abort()
-        } catch {
-          // already finished
-        }
+            try {
+              request.abort()
+            } catch {
+              // already finished
+            }
 
-        reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-      }, timeoutMs)
+            reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+          }, timeoutMs)
+        : undefined
 
       request.on('response', (res: Electron.IncomingMessage): void => {
         wireOauthSessionResponse(res, {
@@ -13368,6 +13374,18 @@ function createWindow() {
 
   const revealController = wireWindowReveal(createdMainWindow, {
     onRevealed: () => {
+      scheduleLightSelfUpdate({
+        light: PRODUCT_IDENTITY.light,
+        primary: isPrimaryInstance,
+        window: createdMainWindow,
+        isQuitting: () => appQuitting || isQuittingForHandoff,
+        quitForHandoff: () => {
+          isQuittingForHandoff = true
+          app.quit()
+        },
+        log: rememberLog
+      })
+
       // Persist geometry as soon as the window is visible so a crash before the
       // first clean resize/move/close still captures the restored bounds (#56726).
       schedulePersistWindowState()
@@ -14915,6 +14933,12 @@ async function fetchJsonForBackend(
   opts: { method?: string; body?: unknown; upload?: unknown; timeoutMs?: number; profileScoped?: boolean } = {}
 ) {
   const url = joinBackendApiUrl(descriptor.baseUrl, path)
+  const route = path.split('?', 1)[0]
+  const fileTransfer = Boolean(opts.upload) || (opts.method === 'POST'
+    ? route === '/api/chat/image-upload' || route === '/api/chat/file-upload'
+    : (!opts.method || opts.method === 'GET') &&
+      (route === '/api/fs/read-text' || route === '/api/fs/read-data-url' || route === '/api/media/proxy'))
+  const timeoutMs = opts.timeoutMs ?? (fileTransfer ? 0 : undefined)
 
   // A native grant names one profile and the gateway refuses `all`: assemble the unified
   // session lists, project tree and PR scan from one read per profile, each carrying that
@@ -14939,20 +14963,12 @@ async function fetchJsonForBackend(
   }
 
   if (descriptor.authMode === 'oauth') {
-    const options = { method: opts.method, body: opts.body, timeoutMs: opts.timeoutMs, headers: descriptor.headers }
+    const options = { method: opts.method, body: opts.body, upload: opts.upload, timeoutMs, headers: descriptor.headers }
 
-    // The bearer leg is fetchJson, which carries multipart; the cookie leg rides electron.net with
-    // JSON headers only, so an upload there fails loudly rather than corrupting the file.
     return requestWithOauthFallback(descriptor.baseUrl, {
       ensureNativeAccessToken,
-      requestWithBearer: (bearer: string) => fetchJson(url, null, { ...options, upload: opts.upload, bearer }),
-      requestWithCookie: async () => {
-        if (opts.upload) {
-          throw new Error('File uploads are not supported against OAuth-gated remote backends yet.')
-        }
-
-        return fetchJsonViaOauthSession(url, options)
-      }
+      requestWithBearer: (bearer: string) => fetchJson(url, null, { ...options, bearer }),
+      requestWithCookie: () => fetchJsonViaOauthSession(url, options)
     })
   }
 
@@ -14960,7 +14976,7 @@ async function fetchJsonForBackend(
     method: opts.method,
     body: opts.body,
     upload: opts.upload,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs,
     headers: descriptor.headers,
     gatewayDescriptor: descriptor.gatewayEndpoint ? descriptor : undefined
   })
@@ -15717,7 +15733,7 @@ async function dispatchRegistryApiRequest(
     method: request?.method,
     body: request?.body,
     upload: request?.upload,
-    timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+    timeoutMs: request?.timeoutMs
   })
 
   desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response, connection.mode)
@@ -15812,8 +15828,6 @@ async function handleHermesApiRequest(request) {
     const ensureOpts = { passive: request?.passive, request: { method: request?.method, path: request?.path } }
     connection = await ensureBackend(routeProfile, ensureOpts)
 
-    const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-
     // Main's shared transport for every descriptor: configured headers, a native
     // gateway grant per attempt, and the OAuth bearer→cookie fallback that
     // survives refresh failures and login races (requestWithOauthFallback).
@@ -15821,7 +15835,7 @@ async function handleHermesApiRequest(request) {
       method: request?.method,
       body: request?.body,
       upload: request?.upload,
-      timeoutMs
+      timeoutMs: request?.timeoutMs
     })
 
     response = connection.gatewayEndpoint
@@ -15868,7 +15882,8 @@ function formatApiRequestFailure(
   return `[hermes:api ${method} ${path}] ${detail}`.slice(0, 6000)
 }
 
-ipcMain.handle('hermes:api', async (_event, request) => {
+ipcMain.handle('hermes:api', async (_event, rawRequest) => {
+  const request = await resolveApiUploadPath(rawRequest)
   // Hold the deletion gate for BOTH profile deletes and renames: a concurrent
   // renderer reconnect entering ensureBackend() mid-mutation would otherwise
   // respawn the old-name backend and recreate its HERMES_HOME (#45474).
@@ -15936,53 +15951,6 @@ const nativeNotifications = registerNativeNotifications({
   focusWindow
 })
 
-// Data-URL file load cap (composer attach + local previews). Main owns the
-// persisted MB value so every IPC read honours Settings → Chat without the
-// renderer having to pass maxBytes on each call. Default is 16 MB; clamp
-// lives in hardening.ts.
-const DATA_URL_READ_MAX_CONFIG_PATH = path.join(app.getPath('userData'), 'data-url-read-max.json')
-
-function readPersistedDataUrlReadMaxMb() {
-  try {
-    return clampDataUrlReadMaxMb(JSON.parse(fs.readFileSync(DATA_URL_READ_MAX_CONFIG_PATH, 'utf8')).maxMb)
-  } catch {
-    return DATA_URL_READ_DEFAULT_MAX_MB
-  }
-}
-
-let dataUrlReadMaxMb = readPersistedDataUrlReadMaxMb()
-
-function persistDataUrlReadMaxMb(maxMb) {
-  const next = clampDataUrlReadMaxMb(maxMb)
-  dataUrlReadMaxMb = next
-
-  try {
-    fs.mkdirSync(path.dirname(DATA_URL_READ_MAX_CONFIG_PATH), { recursive: true })
-    fs.writeFileSync(DATA_URL_READ_MAX_CONFIG_PATH, JSON.stringify({ maxMb: next }, null, 2), 'utf8')
-  } catch (error) {
-    rememberLog(`[data-url-read-max] write failed: ${error.message}`)
-  }
-
-  return next
-}
-
-ipcMain.handle('hermes:data-url-read-max:get', () => ({
-  maxMb: dataUrlReadMaxMb,
-  // Keep the default bytes constant visible for tests / diagnostics.
-  defaultMaxMb: DATA_URL_READ_DEFAULT_MAX_MB,
-  maxBytes: dataUrlReadMaxBytesFromMb(dataUrlReadMaxMb)
-}))
-
-ipcMain.handle('hermes:data-url-read-max:set', (_event, maxMb) => {
-  const next = persistDataUrlReadMaxMb(maxMb)
-
-  return {
-    maxMb: next,
-    defaultMaxMb: DATA_URL_READ_DEFAULT_MAX_MB,
-    maxBytes: dataUrlReadMaxBytesFromMb(next)
-  }
-})
-
 ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
   // Backend-reported paths are WSL/POSIX (`/home/...`, `/mnt/c/...`); on a
   // Windows host bridge them to a UNC/drive form, same as directory reads.
@@ -15990,7 +15958,6 @@ ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
 
   try {
     return await readFileDataUrlForIpc(bridgedPath, {
-      maxBytes: dataUrlReadMaxBytesFromMb(dataUrlReadMaxMb),
       mimeType: mimeTypeForPath(resolveRequestedPathForIpc(bridgedPath, { purpose: 'File preview' })),
       purpose: 'File preview'
     })
@@ -16003,16 +15970,35 @@ ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
   }
 })
 
-// Remote attachment transfer is independent of the preview / Settings path.
-// Keep a finite cap so Electron + base64 memory stays bounded while archives
-// can exceed the default 16 MiB preview ceiling (and still fit the gateway
-// WebSocket frame limit after base64 expansion).
+// A renderer `upload: { path }` names a local file for a multipart REST upload
+// (remote chat attachments). Read it here with the same checks as the attach
+// read, so large files never cross IPC as bytes or base64 (local change).
+async function resolveApiUploadPath(request: any) {
+  const upload = request?.upload
+
+  if (!upload || typeof upload.path !== 'string') {
+    return request
+  }
+
+  const { resolvedPath } = await resolveReadableFileForIpc(resolveIpcFileReadPath(upload.path), {
+    purpose: 'Attachment upload'
+  })
+
+  return {
+    ...request,
+    upload: {
+      filename: upload.filename || path.basename(resolvedPath),
+      contentType: upload.contentType || mimeTypeForPath(resolvedPath),
+      bytes: await fs.promises.readFile(resolvedPath)
+    }
+  }
+}
+
 ipcMain.handle('hermes:readFileDataUrlForAttach', async (_event, filePath) => {
   const bridgedPath = resolveIpcFileReadPath(filePath)
 
   try {
     return await readFileDataUrlForIpc(bridgedPath, {
-      maxBytes: ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
       mimeType: mimeTypeForPath(resolveRequestedPathForIpc(bridgedPath, { purpose: 'Attachment upload' })),
       purpose: 'Attachment upload'
     })
@@ -16028,29 +16014,20 @@ ipcMain.handle('hermes:readFileDataUrlForAttach', async (_event, filePath) => {
 ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
   try {
     const { resolvedPath, stat } = await resolveReadableFileForIpc(resolveIpcFileReadPath(filePath), {
-      maxBytes: TEXT_PREVIEW_SOURCE_MAX_BYTES,
       purpose: 'Text preview'
     })
 
     const ext = path.extname(resolvedPath).toLowerCase()
-    const handle = await fs.promises.open(resolvedPath, 'r')
-    const bytesToRead = Math.min(stat.size, TEXT_PREVIEW_MAX_BYTES)
+    const buffer = await fs.promises.readFile(resolvedPath)
 
-    try {
-      const buffer = Buffer.alloc(bytesToRead)
-      const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0)
-
-      return {
-        binary: looksBinary(buffer.subarray(0, Math.min(bytesRead, 4096))),
-        byteSize: stat.size,
-        language: PREVIEW_LANGUAGE_BY_EXT[ext] || 'text',
-        mimeType: mimeTypeForPath(resolvedPath),
-        path: resolvedPath,
-        text: buffer.subarray(0, bytesRead).toString('utf8'),
-        truncated: stat.size > TEXT_PREVIEW_MAX_BYTES
-      }
-    } finally {
-      await handle.close()
+    return {
+      binary: looksBinary(buffer.subarray(0, 4096)),
+      byteSize: stat.size,
+      language: PREVIEW_LANGUAGE_BY_EXT[ext] || 'text',
+      mimeType: mimeTypeForPath(resolvedPath),
+      path: resolvedPath,
+      text: buffer.toString('utf8'),
+      truncated: false
     }
   } catch (error) {
     // A preview probing a file that is gone (deleted, moved, or cleared from
@@ -16066,11 +16043,7 @@ ipcMain.handle('hermes:readFileText', async (_event, filePath) => {
   }
 })
 
-// Runtime desktop plugins load their FULL source through this door.
-// `hermes:readFileText` is the *preview* read and silently truncates at
-// TEXT_PREVIEW_MAX_BYTES (512 KiB) — for a plugin that means evaluating half a
-// file. Dedicated generous cap, full read, and a hard EFBIG (via maxBytes)
-// instead of truncation when the source exceeds it.
+// Keep the separate runtime plugin loader capped.
 const PLUGIN_SOURCE_MAX_BYTES = 16 * 1024 * 1024
 
 ipcMain.handle('hermes:readPluginSource', async (_event: unknown, filePath: unknown) => {

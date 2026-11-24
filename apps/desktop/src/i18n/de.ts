@@ -5205,6 +5205,10 @@ export const deOverrides = {
       credentialsHeading: 'Zugangsdaten'
     },
     mcpSetup: {
+      updateTitle: 'MCP-Server aktualisieren',
+      updateAction: 'Aktualisieren',
+      updateSetup: server => `${server} aktualisieren`,
+      updated: server => `${server} aktualisiert`,
       installTitle: 'MCP-Server hinzufügen',
       enableTitle: 'MCP-Server aktivieren',
       authorizeTitle: 'MCP-Server autorisieren',

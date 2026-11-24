@@ -160,7 +160,7 @@ describe('session tile attachment occurrence ownership', () => {
       submitted = result.current.submitText('describe this')
     })
 
-    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything()))
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything(), 0))
     expect(scope.attachments.updateIfCurrent(original, { thumbnailUrl: THUMBNAIL })).toBe(true)
 
     attach.resolve({ attached: true, path: STAGED_PATH })
@@ -206,7 +206,7 @@ describe('session tile attachment occurrence ownership', () => {
       submitted = result.current.submitText('describe this')
     })
 
-    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything()))
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything(), 0))
     scope.attachments.remove(original.id)
     scope.attachments.add(replacement)
 
@@ -244,7 +244,7 @@ describe('session tile attachment occurrence ownership', () => {
       submitted = result.current.submitText('describe this')
     })
 
-    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything()))
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', expect.anything(), 0))
     scope.attachments.remove(original.id)
     scope.attachments.add(replacement)
     attach.resolve({ attached: true, path: STAGED_PATH })

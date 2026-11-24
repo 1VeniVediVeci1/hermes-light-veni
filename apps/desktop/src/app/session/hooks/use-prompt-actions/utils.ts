@@ -537,8 +537,7 @@ export async function readImageForRemoteAttach(
 
 // Read a non-image file as a data URL for upload via file.attach. Returns null
 // when the desktop bridge can't read the file (e.g. it was moved/deleted).
-// Prefer the attach-specific IPC (256 MiB) so remote uploads are not stuck on
-// the preview/Settings default; fall back for older Electron shells.
+// Prefer the attach-specific IPC when supported by the Electron shell.
 export async function readFileDataUrlForAttach(filePath: string): Promise<string | null> {
   const reader = window.hermesDesktop?.readFileDataUrlForAttach ?? window.hermesDesktop?.readFileDataUrl
 

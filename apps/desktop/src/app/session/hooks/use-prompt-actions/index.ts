@@ -12,6 +12,7 @@ import { isSlashCommandText, pathLabel } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
+import { isBrowserHostedDesktop } from '@/lib/platform'
 import { normalize } from '@/lib/text'
 import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
 import { clearClarifyRequest } from '@/store/clarify'
@@ -81,7 +82,7 @@ import { useSlashCommand } from './slash'
 import { captureSteeringSession } from './steering-session'
 import { captureSubmissionDestination } from './submission-destination'
 import { useSubmitPrompt } from './submit'
-import { uploadServerOwnedImage } from './upload-server-image'
+import { stageRemoteFileOverHttp, uploadRemoteImageOverHttp, uploadServerOwnedImage } from './upload-server-image'
 import {
   blobToDataUrl,
   delay,
@@ -96,6 +97,10 @@ import {
   type SubmitTextOptions,
   withSessionNotFoundResume
 } from './utils'
+
+// Attach RPCs carry or copy the whole file, so no client deadline (0 = none): a large file over a
+// slow link must not be abandoned while the gateway is still receiving it (local change).
+const ATTACH_REQUEST_TIMEOUT_MS = 0
 
 interface HandoffResult {
   ok: boolean
@@ -145,7 +150,10 @@ export async function uploadComposerAttachment(
     throw new Error(`Could not attach ${label}: staged source changed; select the file again`)
   }
 
-  const uploadBytes = !stagedUpload && (remote || attachmentPathNeedsUpload(path, backendCwd, terminalBackend))
+  // Remote native Desktop: bytes go over HTTP first, then a small attach RPC
+  // (see upload-server-image.ts). The browser host stages on selection instead.
+  const httpUpload = !stagedUpload && remote && !isBrowserHostedDesktop()
+  const uploadBytes = !stagedUpload && !httpUpload && (remote || attachmentPathNeedsUpload(path, backendCwd, terminalBackend))
 
   if (attachment.kind === 'image' && serverOwnsComposerQueue(storedSessionId ?? opts.sessionId)) {
     // Pin HTTP to the same owner before the native byte read yields. Images
@@ -161,6 +169,20 @@ export async function uploadComposerAttachment(
   // full-resolution bytes the model needs.
   let imagePayload: Awaited<ReturnType<typeof readImageForRemoteAttach>> | null = null
   let fileDataUrl: null | string = null
+  let hostImagePath: null | string = null
+  let hostFile: Awaited<ReturnType<typeof stageRemoteFileOverHttp>> | null = null
+
+  if (httpUpload) {
+    try {
+      if (attachment.kind === 'image') {
+        hostImagePath = await uploadRemoteImageOverHttp(destination, path, label)
+      } else {
+        hostFile = await stageRemoteFileOverHttp(destination, path, label)
+      }
+    } catch (err) {
+      throw friendlyRemoteAttachError(err, label)
+    }
+  }
 
   if (uploadBytes) {
     try {
@@ -181,13 +203,17 @@ export async function uploadComposerAttachment(
   const stageForSession = async (liveSessionId: string): Promise<ComposerAttachment> => {
     if (attachment.kind === 'image') {
       const result = imagePayload
-        ? await requestGateway<ImageAttachResponse>('image.attach_bytes', {
-            session_id: liveSessionId,
-            content_base64: imagePayload.contentBase64,
-            filename: imagePayload.filename
-          })
+        ? await requestGateway<ImageAttachResponse>(
+            'image.attach_bytes',
+            {
+              session_id: liveSessionId,
+              content_base64: imagePayload.contentBase64,
+              filename: imagePayload.filename
+            },
+            ATTACH_REQUEST_TIMEOUT_MS
+          )
         : await requestGateway<ImageAttachResponse>('image.attach', {
-            path,
+            path: hostImagePath ?? path,
             session_id: liveSessionId
           })
 
@@ -206,15 +232,23 @@ export async function uploadComposerAttachment(
       }
     }
 
-    const result = await requestGateway<FileAttachResponse>('file.attach', {
-      name: label,
-      session_id: liveSessionId,
-      // Omit path as well as bytes for the provenance-aware branch: an older
-      // RPC implementation must reject it rather than ignore source ownership.
-      ...(stagedUpload
-        ? { staged_upload: stagedUpload }
-        : { path, ...(fileDataUrl ? { data_url: fileDataUrl } : {}) })
-    })
+    const result = await requestGateway<FileAttachResponse>(
+      'file.attach',
+      {
+        name: label,
+        session_id: liveSessionId,
+        // Omit path as well as bytes for the provenance-aware branch: an older
+        // RPC implementation must reject it rather than ignore source ownership.
+        ...(stagedUpload
+          ? { staged_upload: stagedUpload }
+          : hostFile
+            ? hostFile.staged_upload
+              ? { staged_upload: hostFile.staged_upload }
+              : { path: hostFile.path }
+            : { path, ...(fileDataUrl ? { data_url: fileDataUrl } : {}) })
+      },
+      ATTACH_REQUEST_TIMEOUT_MS
+    )
 
     if (!result.attached || !result.ref_text) {
       throw new Error(result.message || `Could not attach ${label}`)

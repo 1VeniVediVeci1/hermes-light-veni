@@ -87,7 +87,11 @@ async def test_a_model_pick_on_a_messaging_chat_is_the_chats_next_turn_model(tmp
         level = runner._resolve_session_reasoning_config(source=source, session_key=route, model='picked')
         assert level and level.get('effort') == 'low', level
         info = await viewer.dispatch({'id': 3, 'method': 'session.info', 'params': {'session_id': root}})
-        assert (info['result']['model'], info['result']['reasoning_effort']) == ('picked', 'low'), info
+        assert (info['result']['model'], info['result']['provider'], info['result']['reasoning_effort']) == (
+            'picked', 'custom', 'low'), info
+        picker = await viewer.dispatch({'id': 4, 'method': 'model.options',
+                                        'params': {'session_id': root, 'explicit_only': True}})
+        assert (picker['result']['model'], picker['result']['provider']) == ('picked', 'custom'), picker
     finally:
         await viewer.close()
         runner.session_store.close_all_db_handles()
@@ -138,6 +142,9 @@ async def test_a_cold_model_pick_resolves_against_the_chats_saved_provider(tmp_p
     runner.session_store.set_model_override(route, saved)
     assert runner._session_model_override(route) is None  # on disk only, as after a restart
     try:
+        picker = await viewer.dispatch({'id': 2, 'method': 'model.options',
+                                        'params': {'session_id': root, 'explicit_only': True}})
+        assert (picker['result']['model'], picker['result']['provider']) == ('saved-model', 'custom'), picker
         picked = await viewer.dispatch(_mutate(root, fences, 'model', {'model': 'picked'}, 'cold-pick'))
 
         assert picked.get('result', {}).get('model') == 'picked', picked

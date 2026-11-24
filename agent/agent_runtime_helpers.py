@@ -1107,6 +1107,10 @@ def _apply_primary_runtime_fields(agent, rt: dict[str, Any]) -> None:
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
     agent.api_key = rt["api_key"]
+    agent._timeout_provider = rt.get("timeout_provider", agent.requested_provider or agent.provider)
+    agent._provider_streaming = rt.get("provider_streaming")
+    if "disable_streaming_seed" in rt:  # the route's streaming seed; verdicts ride route_verdicts
+        agent._disable_streaming_seed = rt["disable_streaming_seed"]
     agent._reasoning_echo_flag = rt.get("reasoning_echo_flag", False)
     agent.request_overrides = dict(rt.get("request_overrides") or {})
     agent._client_kwargs = dict(rt["client_kwargs"])
@@ -1119,7 +1123,7 @@ def _build_anthropic_client_from_runtime(agent, rt: dict[str, Any]) -> None:
     agent._anthropic_base_url = rt["anthropic_base_url"]
     agent._anthropic_client = build_anthropic_client(
         rt["anthropic_api_key"], rt["anthropic_base_url"],
-        timeout=get_provider_request_timeout(agent.provider, agent.model),
+        timeout=get_provider_request_timeout(agent._timeout_provider_id(), agent.model),
     )
     agent._is_anthropic_oauth = rt["is_anthropic_oauth"]
     agent.client = None
@@ -2027,7 +2031,19 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             client_kwargs, timeout=timeout if isinstance(timeout, (int, float)) else None,
         )
     if "http_client" not in client_kwargs:
-        keepalive_http = agent._build_keepalive_http_client(client_kwargs.get("base_url", ""), verify=httpx_verify)
+        from hermes_cli.route_controls import openai_transport_controls
+        client_kwargs.update(openai_transport_controls(
+            client_kwargs.get("base_url", ""), getattr(agent, "_timeout_provider", None)))
+        proxy_url = client_kwargs.pop("proxy_url", None)
+        proxy_fallback = bool(client_kwargs.pop("proxy_fallback_to_direct", False))
+        transport_kwargs = {}
+        if proxy_url is not None or proxy_fallback:
+            transport_kwargs = {"proxy_url": proxy_url, "proxy_fallback_to_direct": proxy_fallback}
+        keepalive_http = agent._build_keepalive_http_client(
+            client_kwargs.get("base_url", ""), verify=httpx_verify, **transport_kwargs,
+        )
+        if keepalive_http is None and transport_kwargs:
+            raise RuntimeError("Explicit route transport is unavailable; refusing SDK defaults")
         if keepalive_http is not None:
             client_kwargs["http_client"] = keepalive_http
     # Retries belong to the outer conversation loop (honors Retry-After); SDK retries would
@@ -2087,7 +2103,8 @@ _SWITCH_SNAPSHOT_FIELDS = (
     "model", "provider", "requested_provider", "base_url", "api_mode", "api_key", "client",
     "_anthropic_client", "_anthropic_api_key", "_anthropic_base_url", "_is_anthropic_oauth",
     "_config_context_length", "_reasoning_echo_flag", "runtime_capabilities",
-    "_credential_pool", "_credential_pool_entry_id", *ROUTE_VERDICT_FIELDS,
+    "_credential_pool", "_credential_pool_entry_id", "_provider_streaming", "_timeout_provider",
+    "_disable_streaming_seed", *ROUTE_VERDICT_FIELDS,
 )
 _MISSING = object()
 
@@ -2190,7 +2207,7 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         agent._anthropic_base_url = base_url or getattr(agent, "_anthropic_base_url", None)
         agent._anthropic_client = build_anthropic_client(
             effective_key, agent._anthropic_base_url,
-            timeout=get_provider_request_timeout(agent.provider, agent.model),
+            timeout=get_provider_request_timeout(agent._timeout_provider_id(), agent.model),
         )
         agent._is_anthropic_oauth = anthropic_route_is_oauth(agent._anthropic_base_url, effective_key, provider=new_provider)
         agent.client = None
@@ -2214,7 +2231,7 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         )
     except Exception:
         logger.debug("custom-provider TLS resolution skipped on switch_model", exc_info=True)
-    timeout = get_provider_request_timeout(agent.provider, agent.model)
+    timeout = get_provider_request_timeout(agent._timeout_provider_id(), agent.model)
     if timeout is not None:
         agent._client_kwargs["timeout"] = timeout
     # Reapply provider headers (OpenRouter HTTP-Referer/X-Title) lost when _client_kwargs was
@@ -2229,6 +2246,7 @@ def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_
     agent._config_context_length = None
     agent.model = new_model
     agent.provider = agent.requested_provider = new_provider
+    agent._timeout_provider = new_provider
     # Re-read reasoning_echo so the flag reflects the new primary model (see _reasoning_echo_opt_in).
     agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
     # Empty base_url while the provider changes means upstream resolution failed; falling back to
@@ -2243,6 +2261,11 @@ def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_
             "refusing to keep the previous provider's endpoint"
         )
     agent.api_mode = api_mode
+    # provider_streaming is scoped to the old resolved route. A manual model switch
+    # only supplies endpoint identity, so resolve the destination control afresh.
+    agent._provider_streaming = None
+    from agent.agent_init import refresh_route_streaming
+    refresh_route_streaming(agent)
     # New api_mode may need a different transport.
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
@@ -3453,9 +3476,15 @@ def _iter_httpx_pools_with_owner(http_client: Any):
     try:
         transports = [getattr(http_client, "_transport", None)]
         transports += list((getattr(http_client, "_mounts", None) or {}).values())
+        seen_transports: set[int] = set()
         for transport in transports:
-            if transport is None:
+            if transport is None or id(transport) in seen_transports:
                 continue
+            seen_transports.add(id(transport))
+            # Composed transports retain per-child shared-pool ownership checks.
+            children = getattr(transport, "_hermes_inner_transports", ())
+            if isinstance(children, (tuple, list)):
+                transports.extend(children)
             # Connections live under ``_pool``; a directly mounted HTTPProxy *is* a ConnectionPool,
             # so ``_connections`` may sit on the transport itself.
             pool = getattr(transport, "_pool", None)

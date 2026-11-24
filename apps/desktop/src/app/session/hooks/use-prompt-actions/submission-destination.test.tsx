@@ -456,11 +456,12 @@ describe('submission intent destinations', () => {
     )
   })
 
-  it('captures an attachment upload owner before native byte reading yields', async () => {
+  it('pins HTTP file staging and the subsequent attach to the captured owner', async () => {
     const { uploadComposerAttachment } = await import('.')
-    const gate = deferred<string>()
+    const gate = deferred<{ path: string }>()
     const original = window.hermesDesktop
-    window.hermesDesktop = { ...original, readFileDataUrl: vi.fn(() => gate.promise) } as never
+    const api = vi.fn(() => gate.promise)
+    window.hermesDesktop = { ...original, api } as never
     $sessions.set([{ id: 'stored-a', connection_id: 'owner-a', profile: 'alice' }] as never)
     wire.request.mockResolvedValue({ attached: true, ref_text: '@file:staged.txt' })
     const ambient = vi.fn(async () => ({ attached: true, ref_text: '@file:wrong.txt' })) as GatewayRequest
@@ -478,18 +479,22 @@ describe('submission intent destinations', () => {
         }
       )
 
-      $sessions.set([{ id: 'stored-a', connection_id: 'owner-b', profile: 'bob' }] as never)
+      $connection.set({ connectionId: 'owner-b', mode: 'remote' } as never)
       $activeGatewayProfile.set('bob')
-      gate.resolve('data:text/plain;base64,cHJpdmF0ZQ==')
+      const hostPath = '/owner-a/uploads/staged.txt'
+      gate.resolve({ path: hostPath })
       await pending
-      expect(wire.request).toHaveBeenCalledWith(
+      expect(api).toHaveBeenCalledExactlyOnceWith({
+        method: 'POST', path: '/api/chat/file-upload', connectionId: 'owner-a', profile: 'alice',
+        upload: { path: '/private.txt', filename: 'private.txt' }
+      })
+      expect(wire.request).toHaveBeenCalledExactlyOnceWith(
         'owner-a',
         'alice',
         'file.attach',
-        expect.objectContaining({
-          session_id: 'runtime-a',
-          data_url: 'data:text/plain;base64,cHJpdmF0ZQ=='
-        })
+        { name: 'private.txt', path: hostPath, session_id: 'runtime-a' },
+        0,
+        undefined
       )
       expect(ambient).not.toHaveBeenCalled()
     } finally {

@@ -59,6 +59,22 @@ def test_get_nous_subscription_features_recognizes_direct_exa_backend(monkeypatc
     assert features.web.current_provider == "exa"
 
 
+def test_brave_readiness_only_activates_selected_brave_backend(monkeypatch):
+    env = {"BRAVE_SEARCH_API_KEY": "brave-test"}
+    monkeypatch.setattr(ns, "get_env_value", lambda name: env.get(name, ""))
+    monkeypatch.setattr(ns, "get_nous_portal_account_info", lambda **_kw: _account(logged_in=False))
+    monkeypatch.setattr(ns, "_toolset_enabled", lambda _config, key: key == "web")
+    monkeypatch.setattr(ns, "_has_browser_harness", lambda: False)
+    monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
+    monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
+
+    brave = ns.get_nous_subscription_features({"web": {"backend": "brave-free"}})
+    firecrawl = ns.get_nous_subscription_features({"web": {"backend": "firecrawl"}})
+
+    assert brave.web.active is True and brave.web.managed_by_nous is False
+    assert firecrawl.web.active is False
+
+
 def test_get_nous_subscription_features_recognizes_keyless_tavily_backend(monkeypatch):
     """Selecting Tavily in setup/tools counts as available with no API key.
 

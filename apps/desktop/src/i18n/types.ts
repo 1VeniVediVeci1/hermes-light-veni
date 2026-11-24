@@ -4087,6 +4087,10 @@ export interface Translations extends NoticeTranslations {
     themePicker: ThemePickerCopy
     catalogInstall: CatalogInstallTranslations
     mcpSetup: {
+      updateTitle: string
+      updateAction: string
+      updateSetup: (server: string) => string
+      updated: (server: string) => string
       installTitle: string
       enableTitle: string
       authorizeTitle: string

@@ -4603,6 +4603,10 @@ export const en: Translations = {
     themePicker: enThemePicker,
     catalogInstall: enCatalogInstall,
     mcpSetup: {
+      updateTitle: 'Update MCP servers',
+      updateAction: 'Update',
+      updateSetup: server => `Update ${server}`,
+      updated: server => `Updated ${server}`,
       installTitle: 'Add MCP servers',
       enableTitle: 'Enable MCP servers',
       authorizeTitle: 'Authorize MCP servers',

@@ -65,7 +65,7 @@ interface InputKey {
   upArrow: boolean
 }
 
-const RESOLVED_STATES = ['connected', 'skipped', 'not_connected']
+const RESOLVED_STATES = ['connected', 'updated', 'skipped', 'not_connected']
 
 const isUnresolved = (target: ConnectionOperationTarget): boolean =>
   !RESOLVED_STATES.includes(target.state) || (target.state === 'connected' && Boolean(target.discovery_error))
@@ -481,7 +481,10 @@ export function ConnectionSetupOverlay({ cols, t }: ConnectionSetupOverlayProps)
     }
 
     setSubmittedSecrets(new Set(fields.filter(field => field.secret).map(field => field.name)))
-    respond({ targets: [{ env: draft, name: target.name, status: 'approved' }] }, answeredNow())
+    const answer = target.action === 'update'
+      ? { name: target.name, status: 'approved' as const }
+      : { env: draft, name: target.name, status: 'approved' as const }
+    respond({ targets: [answer] }, answeredNow())
   }
 
   // Try again on a failed row with no credentials to correct: the desktop's re-mint, on the open

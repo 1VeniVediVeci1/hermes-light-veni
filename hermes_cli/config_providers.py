@@ -123,7 +123,8 @@ _KNOWN_PROVIDER_KEYS = {
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
     "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-    "catalog_provider", "session_affinity_header",
+    "catalog_provider", "session_affinity_header", "proxy_url", "proxy_fallback_to_direct",
+    "stream", "streaming",
     "gemini_api"}  # read by the gemini provider plugin (which Gemini API a model's calls use)
 
 
@@ -284,6 +285,14 @@ def _normalize_custom_provider_entry(
     elif isinstance(ssl_verify, str) and ssl_verify.strip():
         normalized["ssl_verify"] = ssl_verify.strip()
 
+    if isinstance(entry.get("proxy_url"), str):
+        normalized["proxy_url"] = entry["proxy_url"]
+    if isinstance(entry.get("proxy_fallback_to_direct"), bool):
+        normalized["proxy_fallback_to_direct"] = entry["proxy_fallback_to_direct"]
+    streaming = entry.get("stream", entry.get("streaming"))
+    if isinstance(streaming, bool):
+        normalized["streaming"] = streaming
+
     return normalized
 
 
@@ -298,7 +307,8 @@ def _custom_provider_entry_to_provider_config(
     for field in (
         "name", "api_key", "key_env", "key_cmd", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
-        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider"):
+        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider",
+        "proxy_url", "proxy_fallback_to_direct", "streaming"):
         if field in normalized:
             provider_entry[field] = normalized[field]
     if "model" in normalized:

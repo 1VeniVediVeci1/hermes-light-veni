@@ -499,8 +499,28 @@ _LESSON_LAYER_BLOCK = (
     "a decision table, a recipe, a domain note — each file topical and reusable, never "
     "'<date>-<incident>.md'. Prefer extending an existing references/ file over creating one; "
     "a skill with dozens of one-off references is the failure shape, not the goal.\n"
+    "  • Organize by content, not by size — there is no byte budget. Split a topic into its own "
+    "sub-skill (`<name>/<subtopic>/SKILL.md` with its own frontmatter) only when it triggers "
+    "independently; variants that differ only by a parameter or output form stay in one skill.\n"
+    "  • Write triggers as 'When X'. Do not write unconditional 'always', 'every time', 'must' or "
+    "'before claiming completion' gates.\n"
     "  • Fix the skill in place when it is wrong: edit the sentence that misled, do not append "
     "'UPDATE: actually...' underneath it.\n\n"
+)
+
+# Shared by the skill and combined prompts: where a lesson may be written.
+_SKILL_OWNERSHIP_BLOCK = (
+    "Ownership — where a lesson may go:\n"
+    "  • Official skills (bundled with Hermes, installed from the Skills Hub, or official optional "
+    "skills) are not edited by this review: a locally edited bundled skill stops receiving official "
+    "updates. When unsure, a skill is official if its name is listed in `.bundled_manifest` or "
+    "`.hub/lock.json` of the top-level skills directory that contains it. Put the lesson into the "
+    "self-authored skill that governs the task, or name the suggested change in your summary.\n"
+    "  • Project-specific knowledge — anything that depends on one project's paths, file names, "
+    "configuration or data — does not go into a skill. Skip it; durable project facts belong in that "
+    "project's AGENTS.md, which the main session maintains.\n"
+    "  • Never copy a shared or official skill into this profile to change it: a same-name copy "
+    "shadows the original and stops its updates. Edit the shared skill in place instead.\n\n"
 )
 
 # Shared tail of the skill and combined prompts: what NOT to persist as a skill.
@@ -515,6 +535,16 @@ _DO_NOT_CAPTURE_BLOCK = (
     "for months after the actual problem was fixed.\n"
     "  • Session-specific transient errors that resolved before the conversation ended. If "
     "retrying worked, the lesson is the retry pattern, not the original failure.\n"
+    "  • Defensive process ceremony: SHA-256 freezing, frozen baselines/trees/candidates, manifest "
+    "generation, Product RED, adversarial matrices, fail-closed defaults, unconditional full test "
+    "suites or integrity checks, mandatory independent review, 'always verify' / 'before claiming "
+    "completion, must X' gates, and verification frameworks built to prove a mechanism useful. A "
+    "check is kept only together with its concrete trigger and object: credentials, permissions or "
+    "external publication; physical constraints such as PDK, EM, DRC/LVS; formal releases; or an "
+    "explicit user requirement. Technical knowledge (formulas, commands, APIs, data boundaries) and "
+    "failure lessons are always kept.\n"
+    "  • Per-task progress, rounds, result logs and superseded approaches — they stay in session "
+    "history.\n"
     "  • One-off task narratives. A user asking 'summarize today's market' or 'analyze this PR' is "
     "not a class of work that warrants a skill.\n\n"
     "  • Unresolved failures: if the session ended WITHOUT actually finding a working method — you "
@@ -530,13 +560,14 @@ _DO_NOT_CAPTURE_BLOCK = (
 )
 
 _SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and update the skill library. Be ACTIVE — most sessions produce "
-    "at least one skill update, even if small. A pass that does nothing is a missed learning "
-    "opportunity, not a neutral outcome.\n\n"
+    "Review the conversation above and decide whether the skill library needs an update. Update "
+    "only when the session produced a durable lesson — one of the signals below. A routine session "
+    "that went smoothly produces no skill change; 'Nothing to save.' is the expected result then, "
+    "not a missed opportunity.\n\n"
     "Target shape of the library: CLASS-LEVEL skills, each with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth. Not a flat list of narrow one-session skills, and "
-    "not an umbrella hoarding a references/ file per session. This shapes HOW you update, not "
-    "WHETHER you update.\n\n" + _LESSON_LAYER_BLOCK +
+    "not an umbrella hoarding a references/ file per session.\n\n" + _LESSON_LAYER_BLOCK +
+    _SKILL_OWNERSHIP_BLOCK +
     "Signals to look for (any one of these warrants action):\n"
     "  • User corrected your style, tone, format, legibility, or verbosity. Frustration signals "
     "like 'stop doing X', 'this is too verbose', 'don't format like this', 'why are you "
@@ -546,19 +577,17 @@ _SKILL_REVIEW_PROMPT = (
     "  • User corrected your workflow, approach, or sequence of steps. Encode the correction as a "
     "pitfall or explicit step in the skill that governs that class of task.\n"
     "  • Non-trivial technique, fix, workaround, debugging path, or tool-usage pattern emerged "
-    "that a future session would benefit from. Capture it.\n"
+    "that a future session on another task of the same class would benefit from. Capture it.\n"
     "  • A skill that got loaded or consulted this session turned out to be wrong, missing a step, "
     "or outdated. Patch it NOW.\n\n"
-    "Preference order — prefer the earliest action that fits, but do pick one when a signal above "
-    "fired:\n"
+    "Preference order — prefer the earliest action that fits:\n"
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Look back through the conversation for skills the user "
     "loaded via /skill-name or you read via skill_view. If any of them covers the territory of the "
     "new learning, PATCH that one first (re-load it with skill_view during this review — see "
-    "Read-before-write below). It is the skill that was in play, so it's the right one to extend — "
-    "whoever wrote it: hand-written, installed, bundled, and pinned skills are all yours to "
-    "improve. The one exception is a skill the user LOCKED (`hermes curator lock`): skill_manage "
-    "refuses it — do not retry and do not recreate it under another name; put the suggested "
-    "change in your summary instead.\n"
+    "Read-before-write below). It is the skill that was in play, so it's the right one to extend, "
+    "whether hand-written or pinned — unless it is official (see Ownership above). A skill the user "
+    "LOCKED (`hermes curator lock`) is refused by skill_manage — do not retry and do not recreate "
+    "it under another name; put the suggested change in your summary instead.\n"
     "  2. UPDATE AN EXISTING UMBRELLA (via skills_list + skill_view). If no loaded skill fits but "
     "an existing class-level skill does, patch it. Add a subsection, a pitfall, or broaden a "
     "trigger.\n"
@@ -597,33 +626,33 @@ _SKILL_REVIEW_PROMPT = (
     "If you notice two existing skills that overlap, note it in your reply — the background "
     "curator handles consolidation at scale. Never delete a skill here.\n\n"
     "Do NOT capture" + _DO_NOT_CAPTURE_BLOCK +
-    "'Nothing to save.' is a real option but should NOT be the default. If the session ran "
-    "smoothly with no corrections and produced no new technique, just say 'Nothing to save.' and "
-    "stop. Otherwise, act."
+    "If no signal above fired, or the only candidate content is excluded above, say 'Nothing to "
+    "save.' and stop."
 )
 
 _COMBINED_REVIEW_PROMPT = (
     "Review the conversation above and update two things:\n\n"
     "**Memory**: " + _MEMORY_ROUTING_BLOCK +
-    "**Skills**: how to do this class of task. Be ACTIVE — most sessions produce at least one "
-    "skill update. A pass that does nothing is a missed learning opportunity, not a neutral "
-    "outcome.\n\n"
+    "**Skills**: how to do this class of task. Update a skill only when the session produced a "
+    "durable lesson — one of the signals below. A routine session that went smoothly produces no "
+    "skill change.\n\n"
     "Target shape of the skill library: CLASS-LEVEL skills with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth — not narrow one-session skills, and not an umbrella "
-    "hoarding a references/ file per session.\n\n" + _LESSON_LAYER_BLOCK +
+    "hoarding a references/ file per session.\n\n" + _LESSON_LAYER_BLOCK + _SKILL_OWNERSHIP_BLOCK +
     "Signals that warrant a skill update (any one is enough):\n"
     "  • User corrected your style, tone, format, legibility, verbosity, or approach. Frustration "
     "is a FIRST-CLASS skill signal, not just a memory signal. 'stop doing X', 'don't format like "
     "this', 'I hate when you Y' — embed the lesson in the skill that governs that task so the next "
     "session starts fixed.\n"
-    "  • Non-trivial technique, fix, workaround, or debugging path emerged.\n"
+    "  • Non-trivial technique, fix, workaround, or debugging path emerged that another task of "
+    "the same class would reuse.\n"
     "  • A skill that was loaded or consulted turned out wrong, missing, or outdated — patch it "
     "now.\n\n"
     "Preference order for skills — pick the earliest that fits:\n"
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Check what skills were loaded via /skill-name or "
     "skill_view in the conversation. If one of them covers the learning, PATCH it first (re-load "
     "it with skill_view during this review — see Read-before-write below). It was in play; it's "
-    "the right place, whoever wrote it.\n"
+    "the right place unless it is official (see Ownership above) or locked.\n"
     "  2. UPDATE AN EXISTING UMBRELLA (skills_list + skill_view to find the right one). Patch it.\n"
     "  3. ADD A SUPPORT FILE under an existing umbrella via skill_manage action=write_file. Three "
     "kinds: `references/<topic>.md` for topical depth (decision tables, recipes, quirks, condensed "
@@ -651,7 +680,7 @@ _COMBINED_REVIEW_PROMPT = (
     "consolidation. Never delete a skill here.\n\n"
     "Do NOT capture as skills" + _DO_NOT_CAPTURE_BLOCK +
     "Act on whichever of the two dimensions has real signal. If genuinely nothing stands out on "
-    "either, say 'Nothing to save.' and stop — but don't reach for that conclusion as a default."
+    "either, say 'Nothing to save.' and stop."
 )
 
 

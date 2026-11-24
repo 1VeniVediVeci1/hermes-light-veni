@@ -5214,6 +5214,10 @@ export const frOverrides = {
       credentialsHeading: 'Identifiants'
     },
     mcpSetup: {
+      updateTitle: 'Mettre à jour les serveurs MCP',
+      updateAction: 'Mettre à jour',
+      updateSetup: server => `Mettre à jour ${server}`,
+      updated: server => `${server} mis à jour`,
       installTitle: 'Ajouter des serveurs MCP',
       enableTitle: 'Activer des serveurs MCP',
       authorizeTitle: 'Autoriser des serveurs MCP',

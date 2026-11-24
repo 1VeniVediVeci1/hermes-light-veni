@@ -238,6 +238,13 @@ export function useSessionStateCache({
           }
 
           sessionStateCache.set(sessionId, updated)
+        } else if (storedSessionId && !runtimeIdByStoredSessionIdRef.current.has(storedSessionId)) {
+          // A reconnect drops every stored→runtime binding but keeps the cached
+          // states (invalidateRuntimeBindings). A backend that survived the
+          // reconnect hands the same runtime id back on resume, so re-record the
+          // binding here; otherwise the warm session.activate path never matches
+          // again and every later switch to this chat cold-resumes (local fix).
+          runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
         }
 
         return sessionStateCache.get(sessionId)!

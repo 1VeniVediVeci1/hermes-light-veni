@@ -613,6 +613,8 @@ class CLIModalMixin:
         target_state = target.get("state")
         if target_state == "initiated" and target.get("connect_url"):
             return "url"
+        if target_state == "updated":
+            return "updated"
         if target_state == "failed":
             return "failed"
         if target_state == "pending" and target.get("action") != "authorize":
@@ -739,9 +741,11 @@ class CLIModalMixin:
         if not state:
             return
         target = state["target"]
+        if target.get("state") == "updated":
+            return
         name = str(target.get("name") or "")
         answer = {"name": name, "status": "approved" if approve else "skipped"}
-        if approve:
+        if approve and target.get("action") != "update":
             answer["env"] = dict(state.get("drafts", {}).get(name, {}))
         state["phase"] = "waiting"
         self._paint_now()
@@ -752,6 +756,8 @@ class CLIModalMixin:
         if not state:
             return
         target = state["target"]
+        if target.get("state") == "updated":
+            return
         if not (target.get("kind") == "connector" and target.get("state") in {"failed", "expired"}) \
                 and target.get("state") in {"pending", "failed", "expired"}:
             # Connect on a pending or failed install row is the same attempt with the draft's values.
@@ -822,15 +828,15 @@ class CLIModalMixin:
             self._connection_sync_input_buffer()
         elif target_state == "connected" and target.get("discovery_error"):
             state["phase"] = "authorized"
-        elif target_state in {"connected", "skipped"}:
+        elif target_state in {"connected", "updated", "skipped"}:
             unresolved = [
                 item for item in snapshot.get("targets") or ()
-                if item.get("state") not in {"connected", "skipped"}
+                if item.get("state") not in {"connected", "updated", "skipped"}
             ]
             if unresolved:
                 self._connection_show_target(snapshot, (snapshot.get("targets") or []).index(unresolved[0]))
                 return
-            state["phase"] = "connected"
+            state["phase"] = "updated" if target_state == "updated" else "connected"
         else:
             state["phase"] = "waiting"
         self._paint_now()
@@ -879,8 +885,11 @@ class CLIModalMixin:
             return []
         target = state["target"]
         phase = state.get("phase")
-        buttons = f"{t('cli.connect.button_connect')}    {t('cli.connect.button_cancel')}"
-        lines = [t("cli.connect.set_up", name=target.get("name", ""))]
+        updating = target.get("action") == "update"
+        primary = t("cli.connect.button_update") if updating else t("cli.connect.button_connect")
+        buttons = f"{primary}    {t('cli.connect.button_cancel')}"
+        title_key = "cli.connect.update" if updating else "cli.connect.set_up"
+        lines = [t(title_key, name=target.get("name", ""))]
         if target.get("instructions"):
             lines.append(str(target["instructions"]))
         if phase == "form":
@@ -896,6 +905,8 @@ class CLIModalMixin:
             # A connected row cannot be re-run inside this operation; the agent retries discovery
             # with its next manage_connections call, which needs no new consent.
             lines.extend([t("cli.connect.authorized_no_tools"), t("cli.connect.button_continue")])
+        elif phase == "updated":
+            lines.append(t("cli.connect.updated"))
         elif phase == "connected":
             lines.append(t("cli.connect.connected"))
             if target.get("alias"):

@@ -315,17 +315,10 @@ declare global {
         } | null
       } | null>
       readFileDataUrl: (filePath: string) => Promise<string | HermesReadFileErrorResult>
-      /** Remote non-image attach: higher dedicated cap than preview/Settings default. */
+      /** Read client-local bytes for an attachment upload. */
       readFileDataUrlForAttach?: (filePath: string) => Promise<string | HermesReadFileErrorResult>
-      /** Settings → Chat: max size for local files loaded as data URLs (attach/preview). */
-      dataUrlReadMax?: {
-        get: () => Promise<{ defaultMaxMb: number; maxBytes: number; maxMb: number }>
-        set: (maxMb: number) => Promise<{ defaultMaxMb: number; maxBytes: number; maxMb: number }>
-      }
       readFileText: (filePath: string) => Promise<HermesReadFileTextResult | HermesReadFileErrorResult>
-      /** Full-source read for runtime desktop plugins (readFileText truncates
-       *  at the 512 KiB preview cap). Absent on older shells — callers fall
-       *  back to readFileText and must reject a `truncated` result. */
+      /** Runtime plugin source reader. Older shells may only have a truncating readFileText. */
       readPluginSource?: (filePath: string) => Promise<HermesReadFileTextResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
       /** Native save dialog; returns the chosen path or null on cancel. */
@@ -1685,8 +1678,9 @@ export interface HermesApiRequest {
   body?: unknown
   // Single-file multipart upload (FastAPI UploadFile endpoints). Mutually
   // exclusive with `body`; bytes transfer over IPC as a structured-clone
-  // ArrayBuffer. Token-mode backends only.
-  upload?: { filename: string; contentType?: string; bytes: ArrayBuffer }
+  // ArrayBuffer. Native Desktop may instead name a local `path`: Electron main
+  // reads it with the attachment-read checks, so large files skip IPC copies.
+  upload?: { filename: string; contentType?: string; bytes: ArrayBuffer } | { path: string; filename?: string; contentType?: string }
   timeoutMs?: number
   // Route this REST call to a specific profile's backend. Omit for the primary
   // (window) backend. Read-only cross-profile data is served by the primary, so

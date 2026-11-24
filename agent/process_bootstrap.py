@@ -267,8 +267,10 @@ def close_shared_transports() -> int:
     return len(transports)
 
 
-def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True) -> Optional[Any]:
-    """httpx client for OpenAI SDK calls with env-only proxy policy (None on failure).
+def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True,
+                                proxy_url: Optional[str] = None,
+                                proxy_fallback_to_direct: bool = False) -> Optional[Any]:
+    """httpx client with environment or route proxy policy (explicit policies fail closed).
 
     Explicit no-proxy mounts disable httpx's ``trust_env`` path so macOS system
     proxies (which omit the ExceptionsList) are never applied. ``keepalive_expiry``
@@ -287,7 +289,8 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
     """
     try:
         import httpx
-        proxy = _get_proxy_for_base_url(base_url)
+        proxy = (_get_proxy_for_base_url(base_url) if proxy_url is None
+                 else normalize_proxy_url(proxy_url) if proxy_url else None)
         limits = httpx.Limits(max_keepalive_connections=20, max_connections=100, keepalive_expiry=20.0)
         timeout = httpx.Timeout(connect=15.0, read=None, write=15.0, pool=10.0)  # read=None for SSE streaming
         transport_cls = httpx.AsyncHTTPTransport if async_mode else httpx.HTTPTransport
@@ -298,6 +301,11 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
         hooks = codex_request_compression_hooks(base_url, async_mode=async_mode)
         if hooks:
             client_cls = functools.partial(client_cls, event_hooks=hooks)
+        if proxy and proxy_fallback_to_direct:
+            from agent.proxy_fallback_transport import AsyncProxyFirstFallbackTransport, ProxyFirstFallbackTransport
+            transport = (AsyncProxyFirstFallbackTransport if async_mode else ProxyFirstFallbackTransport)(
+                proxy_url=proxy, verify=verify, limits=limits)
+            return client_cls(transport=transport, timeout=timeout, trust_env=False)
         if proxy is None:
             happy_eyeballs = not async_mode and _uses_codex_cloud_transport(base_url)
             # One pool serves every agent in the process, so its ceiling must cover a whole
@@ -325,9 +333,11 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
                 }
                 # Default transport = the https view; otherwise httpx builds a third, never-used
                 # direct transport (pool + SSL context) per client.
-                return client_cls(limits=limits, timeout=timeout, transport=mounts["https://"], mounts=mounts)
-        return client_cls(limits=limits, timeout=timeout, proxy=proxy, mounts=mounts or None, verify=verify)
+                return client_cls(limits=limits, timeout=timeout, transport=mounts["https://"], mounts=mounts, trust_env=False)
+        return client_cls(limits=limits, timeout=timeout, proxy=proxy, mounts=mounts or None, verify=verify, trust_env=False)
     except Exception:
+        if proxy_url is not None or proxy_fallback_to_direct:
+            raise RuntimeError("Cannot construct explicit route transport; refusing SDK defaults") from None
         return None
 
 

@@ -86,7 +86,6 @@ function EventBody({ event, labels, notice }: { event: CanonicalGroupEvent; labe
 }
 
 // Previews download the whole file over RPC; larger or unsized images keep only Download.
-const IMAGE_PREVIEW_MAX_BYTES = 5 * 1024 * 1024
 
 // Automatic previews share a small download budget per connection, in request order; a file already
 // downloading is joined rather than requested again. Manual Download stays outside it. The budget is
@@ -138,9 +137,8 @@ function ImagePreview({ binding, eventId, attachment, disabled }: {
   const [src, setSrc] = useState('')
   const [near, setNear] = useState(false)
   const box = useRef<HTMLDivElement>(null)
-  const { attachment_id: attachmentId, size } = attachment
+  const { attachment_id: attachmentId } = attachment
   const { connectionId, profile, roomId } = binding
-  const previewable = !!attachmentId && size !== undefined && size <= IMAGE_PREVIEW_MAX_BYTES
 
   // History loads the whole room: fetch only near the viewport. Leaving before its turn gives up the queued place;
   // a started download runs to completion and is shared if the preview returns.
@@ -155,21 +153,21 @@ function ImagePreview({ binding, eventId, attachment, disabled }: {
   }, [src, disabled])
 
   useEffect(() => {
-    if (disabled || !near || !attachmentId || !previewable) {return}
+    if (disabled || !near || !attachmentId) {return}
     let url = ''
     const key = JSON.stringify([connectionId, profile, roomId, eventId, attachmentId])
 
     // A failed preview leaves the Download button as the way to the file.
-    const cancel = queuePreview(connectionId, key, () => fetchCanonicalGroupAttachment({ connectionId, profile, roomId }, eventId, attachmentId), ({ bytes, mime }) => {
+    const cancel = queuePreview(connectionId, key, () => fetchCanonicalGroupAttachment({ connectionId, profile, roomId }, eventId, attachmentId, 0), ({ bytes, mime }) => {
       url = URL.createObjectURL(new Blob([bytes], { type: mime }))
       setSrc(url)
     })
 
     // Dropping `near` makes a re-shown room wait on the observer again, not refetch every preview seen so far at once.
     return () => { cancel(); URL.revokeObjectURL(url); setSrc(''); setNear(false) }
-  }, [connectionId, profile, roomId, eventId, attachmentId, disabled, near, previewable])
+  }, [connectionId, profile, roomId, eventId, attachmentId, disabled, near])
 
-  return previewable ? <div ref={box}>{src && <img alt={attachment.name} className="max-h-64 max-w-full rounded object-contain" src={src} />}</div> : null
+  return attachmentId ? <div ref={box}>{src && <img alt={attachment.name} className="max-h-64 max-w-full rounded object-contain" src={src} />}</div> : null
 }
 
 export function CanonicalGroupHistory({ avatarFor, binding, events, members = [], disabled = false, downloads = true, onReply, pause }: CanonicalGroupHistoryProps) {

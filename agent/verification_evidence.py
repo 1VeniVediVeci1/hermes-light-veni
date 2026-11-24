@@ -25,6 +25,8 @@ _MAX_EVENTS_PER_SESSION_ROOT = 100
 _MAX_TOTAL_UNREFERENCED_EVENTS = 10_000
 _AD_HOC_SCRIPT_NAME_PREFIXES = ("hermes-verify-", "hermes-ad-hoc-")
 _VERIFY_SCHEMA_VERSION = 1
+# Recognized when a workspace declares no verify recipe of its own.
+_FALLBACK_VERIFY_COMMANDS = ("pytest",)
 # Latest verify-command run per (session, root) whose own exit status the shell hid, with the
 # time it ran. Read by the stop nudge in this same process, so it stays in memory; bounded for
 # long-lived gateways.
@@ -579,7 +581,8 @@ def _classify_in_workspace(
     exit_code: int, output: str, pipeline_status: Optional[list[int]],
 ) -> Optional[VerificationEvidence]:
     verify_commands = list(facts.get("verifyCommands") or [])
-    match = _find_canonical_match(command, verify_commands, int(exit_code), pipeline_status)
+    match = _find_canonical_match(
+        command, verify_commands or list(_FALLBACK_VERIFY_COMMANDS), int(exit_code), pipeline_status)
     if match is not None and match[2] is not None:
         canonical, trailing_args, status = match
         kind = _kind_for_command(canonical)
@@ -619,7 +622,7 @@ def record_terminal_result(
     )
     if evidence is not None:
         return _insert_evidence(evidence)
-    verify_commands = list(facts.get("verifyCommands") or [])
+    verify_commands = list(facts.get("verifyCommands") or []) or list(_FALLBACK_VERIFY_COMMANDS)
     if _find_canonical_match(command, verify_commands, int(exit_code), attributed=False):
         _UNATTRIBUTED_RUNS.pop(key, None)
         _UNATTRIBUTED_RUNS[key] = (command, _utc_now())

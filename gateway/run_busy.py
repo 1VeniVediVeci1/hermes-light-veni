@@ -133,6 +133,8 @@ class GatewayBusySessionMixin:
         ``pending_event`` None → the overflow head becomes the pending event; otherwise the head is
         staged into the slot for the NEXT recursion. Returns the (possibly updated) pending_event.
         """
+        from gateway.process_completions import prune_pending_process_events
+        pending_event = prune_pending_process_events(self, session_key, adapter, pending_event)
         overflow = self._overflow_queue(session_key)
         if not overflow:
             return pending_event
@@ -940,6 +942,9 @@ class GatewayBusySessionMixin:
             logger.debug("Failed to send busy-ack: %s", e)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
+        from gateway.process_completions import route_busy_process_event
+        if route_busy_process_event(self, event, session_key):
+            return True
         # Gateway wakes have no external user identity. Admit them before auth/drain/approval
         # handling, without merging their text into an already queued human message.
         if event.internal and event.allow_gateway_control:

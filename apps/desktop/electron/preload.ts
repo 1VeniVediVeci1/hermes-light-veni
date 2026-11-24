@@ -362,10 +362,6 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   readWindowBelow: () => ipcRenderer.invoke('hermes:window:readBelow'),
   readFileDataUrl: filePath => ipcRenderer.invoke('hermes:readFileDataUrl', filePath),
   readFileDataUrlForAttach: filePath => ipcRenderer.invoke('hermes:readFileDataUrlForAttach', filePath),
-  dataUrlReadMax: {
-    get: () => ipcRenderer.invoke('hermes:data-url-read-max:get'),
-    set: maxMb => ipcRenderer.invoke('hermes:data-url-read-max:set', maxMb)
-  },
   readFileText: filePath => ipcRenderer.invoke('hermes:readFileText', filePath),
   readPluginSource: (filePath: string) => ipcRenderer.invoke('hermes:readPluginSource', filePath),
   selectPaths: options => ipcRenderer.invoke('hermes:selectPaths', options),

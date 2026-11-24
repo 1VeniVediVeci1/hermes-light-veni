@@ -137,19 +137,18 @@ describe('terminal drop in the browser-hosted Desktop', () => {
     unbind()
   })
 
-  it('never uploads a file over 16 MiB and names it in a warning', async () => {
+  it('stages both dropped files even when one is over 16 MiB, without warning', async () => {
     const stage = browserBridge(async entry => `/srv/hermes/uploads/${entry.name}`)
     const { host, unbind, write } = bind('bash')
 
-    drop(host, transfer([file('huge.iso', 16 * MIB + 1), file('small.txt', 16 * MIB)]))
+    const files = [file('huge.iso', 16 * MIB + 1), file('small.txt', 16 * MIB)]
+    drop(host, transfer(files))
 
-    await vi.waitFor(() => expect(write).toHaveBeenCalledWith('term-1', "'/srv/hermes/uploads/small.txt' "))
-    expect(stage).toHaveBeenCalledTimes(1)
-    expect(stage.mock.calls[0][0].name).toBe('small.txt')
-    const [warning] = $notifications.get()
-    expect(warning?.kind).toBe('warning')
-    expect(`${warning?.title} ${warning?.message}`).toContain('huge.iso')
-    expect(`${warning?.title} ${warning?.message}`).toContain('16 MiB')
+    await vi.waitFor(() =>
+      expect(write).toHaveBeenCalledWith('term-1', "'/srv/hermes/uploads/huge.iso' '/srv/hermes/uploads/small.txt' ")
+    )
+    expect(stage.mock.calls).toEqual(files.map(entry => [entry]))
+    expect($notifications.get()).toHaveLength(0)
     unbind()
   })
 

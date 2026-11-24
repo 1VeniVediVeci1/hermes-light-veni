@@ -10,19 +10,9 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 import { getElevenLabsVoices, getHermesConfigSchema, saveHermesConfig } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { isSubmitEnter } from '@/lib/ime'
 import { asText } from '@/lib/text'
 import { confirm } from '@/store/confirm'
 import { $activeConnectionId } from '@/store/connections'
-import {
-  $dataUrlReadMaxMb,
-  clampDataUrlReadMaxMb,
-  DATA_URL_READ_DEFAULT_MAX_MB,
-  DATA_URL_READ_MAX_MAX_MB,
-  DATA_URL_READ_MIN_MAX_MB,
-  refreshDataUrlReadMaxMb,
-  setDataUrlReadMaxMb
-} from '@/store/data-url-read-max'
 import { recordSettingsSaved } from '@/store/desktop-metrics'
 import { $disableF12, setDisableF12 } from '@/store/disable-f12'
 import { $alwaysExternalLinks, setAlwaysExternalLinks } from '@/store/external-links'
@@ -329,7 +319,6 @@ function ConfigSettingsInner({
     activeSectionId === 'model' && (subpage === undefined || ['main', 'auxiliary', 'moa'].includes(subpage))
 
   const showDesktopSettings = activeSectionId === 'advanced' && (subpage === undefined || subpage === 'desktop')
-  const showAttachments = activeSectionId === 'chat' && (subpage === undefined || subpage === 'attachments')
   const showSharedMetrics = activeSectionId === 'safety' && subpage === 'privacy'
 
   // Deep-link target from the command palette (?field=<key>): scroll the row
@@ -467,7 +456,7 @@ function ConfigSettingsInner({
     visibleFields.length === 0 &&
     (subpage === undefined
       ? activeSectionId !== 'chat'
-      : !showModelSettings && !showDesktopSettings && !showAttachments && !showSharedMetrics)
+      : !showModelSettings && !showDesktopSettings && !showSharedMetrics)
 
   return renderPage(
     <>
@@ -508,10 +497,6 @@ function ConfigSettingsInner({
           <OnboardingSettings />
         </>
       )}
-      {/* Device-local attach/preview byte cap (main-process IPC guard). Chat is
-          where image-attachment behavior already lives, so this sits above the
-          schema fields for that section. */}
-      {showAttachments ? <AttachmentSizeSetting /> : null}
       {/* Shared metrics are two coupled opt-ins with a consent side effect, so they
           go through their own RPC rather than the generic field autosave. */}
       {showSharedMetrics ? <SharedMetricsSettings /> : null}
@@ -592,76 +577,5 @@ function ConfigSettingsInner({
         </div>
       )}
     </>
-  )
-}
-
-/** Free-form MB cap for Desktop's data-URL attach/preview path (main-process). */
-function AttachmentSizeSetting() {
-  const { t } = useI18n()
-  const c = t.settings.config
-  const stored = useStore($dataUrlReadMaxMb)
-  const [draft, setDraft] = useState(String(stored))
-
-  useEffect(() => {
-    void refreshDataUrlReadMaxMb()
-  }, [])
-
-  useEffect(() => {
-    setDraft(String(stored))
-  }, [stored])
-
-  const commit = () => {
-    // An empty draft means "reset to the default", not the 1 MB floor
-    // (Number('') === 0 would otherwise clamp down to the floor).
-    const applied = draft.trim() === '' ? DATA_URL_READ_DEFAULT_MAX_MB : clampDataUrlReadMaxMb(draft)
-
-    // Unchanged: snap the draft back to the stored value and skip the
-    // pointless IPC write + haptic.
-    if (applied === stored) {
-      setDraft(String(stored))
-
-      return
-    }
-
-    void setDataUrlReadMaxMb(applied).then(next => {
-      setDraft(String(next))
-
-      // On a bridge write failure the store keeps the old value; only
-      // celebrate when the new cap actually landed.
-      if (next === applied) {
-        triggerHaptic('selection')
-      }
-    })
-  }
-
-  return (
-    <ListRow
-      action={
-        <div className="flex items-center gap-2">
-          <Input
-            aria-label={c.attachmentSizeLabel}
-            className="w-20"
-            inputMode="numeric"
-            max={DATA_URL_READ_MAX_MAX_MB}
-            min={DATA_URL_READ_MIN_MAX_MB}
-            onBlur={commit}
-            onChange={event => setDraft(event.target.value)}
-            onKeyDown={event => {
-              if (isSubmitEnter(event)) {
-                event.currentTarget.blur()
-              }
-            }}
-            type="number"
-            value={draft}
-          />
-          <span className="text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
-            {c.attachmentSizeUnit}
-          </span>
-        </div>
-      }
-      description={c.attachmentSizeDesc}
-      id={settingElementId(SETTING_IDS.chat.attachmentSize)}
-      title={c.attachmentSizeTitle}
-    />
   )
 }

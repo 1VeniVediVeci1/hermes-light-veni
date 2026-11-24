@@ -34,7 +34,7 @@ from tools.approval_detection import (
 )
 from tools.approval_floors import (
     _command_matches_permanent_allowlist, _hardline_block_result, _matching_permanent_allowlist_entry, _match_user_deny_rule, _sudo_stdin_block_result,
-    _user_deny_block_result,
+    _user_deny_block_result, hardline_verdict,
 )
 from tools.approval_gateway_wait import _await_gateway_decision
 from tools.approval_provenance import allowlisted_result, preapproved_result
@@ -1317,10 +1317,13 @@ def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
     can run, #58748)."""
     from agent.runtime_self_protection import command_deletes_runtime
 
-    is_hardline, hardline_desc = detect_hardline_command(command)
+    is_hardline, hardline_desc, hardline_allow = hardline_verdict(command)
     if is_hardline:
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
         return _hardline_block_result(hardline_desc, command)
+    if hardline_allow is not None:
+        logger.info("Hardline rule %r exempted by approvals.hardline_allow %r (command: %s)",
+                    hardline_desc, hardline_allow, command[:200])
     runtime_target = command_deletes_runtime(command)
     if runtime_target:
         logger.warning("Runtime self-delete block: %s (command: %s)", runtime_target, command[:200])

@@ -1,6 +1,7 @@
 import type { TranslationOverrides } from './define-locale'
 
 export const deConnectorCard: TranslationOverrides['connectors'] = {
+  updated: 'Aktualisiert',
   title: 'Verbinden Sie Ihre Apps',
   connect: 'Verbinden',
   skip: 'Nicht jetzt',

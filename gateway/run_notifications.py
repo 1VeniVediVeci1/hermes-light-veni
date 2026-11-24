@@ -902,6 +902,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
         restore_completion_route(self, str(evt.get("session_key") or ""))  # watch notices and heartbeats too
         queued, evt = evt, await follow_detached_pin(self, evt)  # the drain reads its verdict off *queued*
+        from tools.process_registry import process_registry
+        from gateway.process_completions import build_process_batch, refresh_process_event
+        if evt.get("type") == "completion" and process_registry.is_completion_consumed(evt.get("session_id", "")):
+            return None
         source = await asyncio.to_thread(self._build_process_event_source, evt)
         if not source:
             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
@@ -954,6 +958,25 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 metadata=metadata,
             )
+            if evt.get("type") == "completion" and self._typed_process_completions():
+                records = evt.get("process_completion_events") or [evt]
+                batch = build_process_batch(records)
+                if batch is not None:
+                    setattr(synth_event, "_process_completion_batch", batch)
+                    metadata["process_completion_events"] = batch.snapshot()
+                    # Rebuild even informational notices from verified unread
+                    # records: a valid sibling cannot authorize stale batch text.
+                    notice_text = synth_event.text
+                    if not refresh_process_event(synth_event):
+                        return None
+                    if batch.parent_session_id != str(metadata.get("gateway_session_id") or ""):
+                        # The proven recipient gets a notice, not ownership of
+                        # the child's data or a parent inline-consumption claim.
+                        delattr(synth_event, "_process_completion_batch")
+                        metadata.pop("process_completion_events", None)
+                        if any(getattr(process_registry.get(r["session_id"]), "handoff_note", "") for r in records):
+                            # A handed-off process keeps its notice text, which names the handoff purpose.
+                            synth_event.text = notice_text
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
@@ -994,6 +1017,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         except Exception as e:
             logger.error("Watch notification injection error: %s", e)
             return False
+
+    def _typed_process_completions(self) -> bool:
+        """Typed process results ride an in-memory batch on the adapter path. A route admitted through
+        the session authority stores a whitelisted descriptor and replays it later, which carries no
+        batch (``process_completion_events`` is refused as ``invalid_params``): it keeps plain notices."""
+        from gateway.session_authorities import active_authority
+        return active_authority(self) is None
 
     @staticmethod
     def _completion_delivery_identity(evt: dict) -> Optional[tuple[str, str, object]]:
@@ -1291,6 +1321,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 identity_claimed = True
             if claim.owner_session_id:
                 # Admission settles the durable claim, so the resolver starts from the owner proven here.
+                if evt.get("type") == "completion":
+                    evt = {**evt, "process_completion_events": evt.get("process_completion_events") or [evt]}
                 evt = {**evt, "parent_session_id": claim.owner_session_id,
                        "proven_session_id": claim.proven_session_id}
             # The rows this admission settles: a turn that cannot confirm the owner offers them again.
@@ -1378,6 +1410,11 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 self._completion_notification_batch_tasks.pop(key, None)
             if not entries:
                 return
+            from tools.process_registry import process_registry
+            entries = [entry for entry in entries if not process_registry.is_completion_consumed(entry[1].get("session_id", ""))]
+            if not entries:
+                delivered = None
+                return
             if getattr(self, 'session_authority', None) is not None:
                 from gateway.session_automation import completion_admission, producer_identity
                 entries_to_deliver = [item for item in entries if completion_admission(self, item[1]) is None]
@@ -1394,7 +1431,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # sibling is never discarded with it.
             delivered = None
             for _text, candidate_evt, _future in entries_to_deliver:
-                candidate_evt = dict(candidate_evt, _display_text=display_text)
+                candidate_evt = dict(candidate_evt, _display_text=display_text,
+                    process_completion_events=[entry[1] for entry in entries_to_deliver])
                 if getattr(self, 'session_authority', None) is not None:
                     candidate_evt = dict(candidate_evt, _automation_identities=[
                         producer_identity(self, evt) for _text, evt, _future in entries_to_deliver])
@@ -1469,9 +1507,10 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             return False
         # A route key alone is not ownership: /new can leave old and new pins
         # in the same queue. Never settle one pin on another pin's acceptance.
-        key = self._event_route_key(
-            evt, (*self._COMPLETION_BATCH_KEY_FIELDS, "parent_session_id", "origin_session_id"),
-        )
+        fields = (*self._COMPLETION_BATCH_KEY_FIELDS, "parent_session_id", "origin_session_id")
+        if evt.get("process_home") and evt.get("parent_session_id"):
+            fields = (*fields, "owner_task_id", "process_home")
+        key = self._event_route_key(evt, fields)
         future = asyncio.get_running_loop().create_future()
         self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
         if key not in self._completion_notification_batch_tasks:
@@ -1776,6 +1815,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             "task_id": getattr(session, "task_id", "") or "",
             "message_id": str(watcher.get("message_id") or "").strip() or None,
             "started_at": getattr(session, "started_at", None),
+            "process_home": getattr(session, "profile_home", ""),
             "command": _redact_gateway_user_facing_secrets(_command),
             "exit_code": session.exit_code,
             "completion_reason": getattr(session, "completion_reason", "exited"),
@@ -1867,9 +1907,12 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         last_output_len = 0
         completion_attempts = 0
         retry_interval = interval
+        completion_admitted = False
+        failure_notice_sent = False
+        terminal_session = None
         while True:
             await asyncio.sleep(retry_interval)
-            session = process_registry.get(session_id)
+            session = process_registry.get(session_id) or terminal_session
             if session is None:
                 break
             surface = should_surface_notification({
@@ -1894,6 +1937,39 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 # wait/log (poll() is read-only and deliberately does NOT mark consumed).
                 if agent_notify and not process_registry.is_completion_consumed(session_id):
                     completion_evt = self._build_process_completion_event(watcher, session, session_id)
+                    typed = bool(self._typed_process_completions() and completion_evt.get("process_home")
+                                 and completion_evt.get("parent_session_id") and completion_evt.get("owner_task_id"))
+                    if typed:
+                        async with self._completion_event_scope(completion_evt):
+                            verdict, owner, _tip = await self._classify_completion_owner(
+                                completion_evt["parent_session_id"], completion_evt["session_key"])
+                        if verdict == "deliver" and owner != completion_evt["parent_session_id"]:
+                            # Child notices (including a handed-off process with
+                            # its original pin) have no parent-owned shadow to
+                            # await. Stop after admission without consuming data.
+                            typed = False
+                    if typed:
+                        if terminal_session is not None and not process_registry.unread_completion_events(
+                                [completion_evt], session_key=completion_evt["session_key"],
+                                parent_session_id=completion_evt["parent_session_id"],
+                                owner_task_id=completion_evt["owner_task_id"],
+                                process_home=completion_evt["process_home"]):
+                            break  # an expired, consumed shadow cannot re-arm forever
+                        terminal_session = session  # retain until unread admission is actually consumed
+                        from agent.estop import is_engaged
+                        async with self._completion_event_scope(watcher):
+                            if is_engaged():
+                                continue
+                        if completion_admitted:
+                            from gateway.process_completions import has_pending_process_shadow
+                            source = await asyncio.to_thread(self._build_process_event_source, completion_evt)
+                            adapter = self._resolve_injection_adapter(platform_name, source) if source is not None else None
+                            if has_pending_process_shadow(self, completion_evt, adapter):
+                                continue
+                            # /stop or finalization discarded an admission, not the unread result.
+                            identity = self._completion_delivery_identity(completion_evt)
+                            with self._completion_delivery_lock:
+                                self._completion_deliveries_delivered.pop(identity, None)
                     synth_text = format_process_notification(completion_evt)
                     if not synth_text:
                         break
@@ -1902,15 +1978,26 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     turn_busy = await self._launching_turn_active(platform_name, watcher)
                     delivered = await self._enqueue_process_completion_notification(synth_text, completion_evt)
                     if delivered is not False:
-                        # The agent normally reports the result itself, so the chat gets no separate
-                        # receipt. While the launching turn is still running the injection only queues a
-                        # follow-up, and the chat would stay mute for as long as that turn lasts
-                        # (#112033): send the concise receipt now.
-                        if turn_busy and (notify_mode in {"concise", "all", "result"} or (
-                            notify_mode == "error" and session.exit_code not in {0, None}
-                        )):
+                        # Typed results reach the agent on its next tool row, so only a failure needs the chat
+                        # receipt; a plain notice only queues a follow-up (#112033), so it gets the usual one.
+                        if typed:
+                            send_receipt = (turn_busy and delivered is True and not failure_notice_sent
+                                            and session.exit_code not in {0, None} and notify_mode != "off"
+                                            and not process_registry.is_completion_consumed(session_id))
+                        else:
+                            send_receipt = turn_busy and (notify_mode in {"concise", "all", "result"} or (
+                                notify_mode == "error" and session.exit_code not in {0, None}))
+                        if send_receipt:
                             message_text = self._format_process_final_message(session_id, session, "concise")
                             await self._send_watcher_message(platform_name, chat_id, thread_id, message_text, watcher)
+                            failure_notice_sent = True
+                        if typed:
+                            if delivered is None:
+                                async with self._completion_event_scope(completion_evt):
+                                    if await self._classify_completion_target(completion_evt["parent_session_id"]) == "terminal":
+                                        break
+                            completion_admitted = True
+                            continue
                         break
                     # A refusal may clear (adapter reconnecting, store draining), so retry with backoff
                     # for a few minutes, then fall through to the plain notice instead of dropping it.

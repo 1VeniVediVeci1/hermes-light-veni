@@ -145,7 +145,8 @@ export async function browserFetch(
 ): Promise<{ response: Response; text: string }> {
   if (!bootstrap.authRequired && !bootstrap.token) {throw webappSignInRequired()}
 
-  const controller = request.timeoutMs === undefined ? null : new AbortController()
+  // A timeout of 0 (or less) means no deadline, as in the gateway request channel.
+  const controller = request.timeoutMs === undefined || request.timeoutMs <= 0 ? null : new AbortController()
   const timeout = controller ? window.setTimeout(() => controller.abort(), request.timeoutMs) : null
   const headers = new Headers(request.headers)
 
@@ -211,6 +212,10 @@ export async function browserApi<T>(bootstrap: BrowserBootstrap, request: Hermes
   let body: BodyInit | undefined
 
   if (request.upload) {
+    if (!('bytes' in request.upload)) {
+      throw new Error('Path uploads need the native Desktop shell')
+    }
+
     const form = new FormData()
 
     const blob = new Blob([request.upload.bytes], {
@@ -224,13 +229,19 @@ export async function browserApi<T>(bootstrap: BrowserBootstrap, request: Hermes
     body = JSON.stringify(request.body)
   }
 
+  const route = request.path.split('?', 1)[0]
+  const fileTransfer = Boolean(request.upload) || (request.method === 'POST'
+    ? route === '/api/chat/image-upload' || route === '/api/chat/file-upload'
+    : (!request.method || request.method === 'GET') &&
+      (route === '/api/fs/read-text' || route === '/api/fs/read-data-url' || route === '/api/media/proxy'))
+
   const { response, text } = await browserFetch(bootstrap, {
     body,
     headers,
     method: request.method,
     path: request.path,
     profile: request.profile,
-    timeoutMs: request.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    timeoutMs: request.timeoutMs ?? (fileTransfer ? 0 : DEFAULT_TIMEOUT_MS)
   })
 
   if (!response.ok) {

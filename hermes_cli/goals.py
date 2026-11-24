@@ -875,7 +875,8 @@ def _render_background_block(background_processes: Optional[list[dict[str, Any]]
     return JUDGE_BACKGROUND_BLOCK_TEMPLATE.format(background_lines="\n".join(lines))
 
 
-def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout: Optional[float]) -> str:
+def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout: Optional[float],
+                         main_runtime: Optional[Dict[str, Any]] = None) -> str:
     """Route through call_llm so auxiliary.goal_judge.* config (provider/model, extra_body,
     reasoning_effort, retries) all apply. Returns the raw reply text."""
     # See #35566.
@@ -883,7 +884,7 @@ def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout
     resp = call_llm(
         task="goal_judge",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        temperature=0, max_tokens=_goal_judge_max_tokens(), timeout=timeout,
+        temperature=0, max_tokens=_goal_judge_max_tokens(), timeout=timeout, main_runtime=main_runtime,
     )
     try:
         return resp.choices[0].message.content or ""
@@ -900,6 +901,7 @@ def judge_goal(
     background_processes: Optional[list[dict[str, Any]]] = None,
     contract: Optional[GoalContract] = None,
     active_delegations: int = 0,
+    main_runtime: Optional[dict[str, Any]] = None,
 ) -> tuple[str, str, bool, Optional[dict[str, Any]], bool]:
     """Ask the auxiliary model whether the goal is satisfied.
 
@@ -943,7 +945,7 @@ def judge_goal(
         prompt = JUDGE_USER_PROMPT_TEMPLATE.format(**common)
 
     try:
-        raw = _call_goal_judge_llm(call_llm, JUDGE_SYSTEM_PROMPT, prompt, timeout)
+        raw = _call_goal_judge_llm(call_llm, JUDGE_SYSTEM_PROMPT, prompt, timeout, main_runtime)
     except AuxiliaryClientUnavailable as exc:
         # No client at all (e.g. a dead Nous refresh token): name the cause so the user is sent to
         # re-authenticate, not to context-length / model debugging (#42177). Still fails open.
@@ -1485,6 +1487,7 @@ class GoalManager:
         self, last_response: str, *, user_initiated: bool = True,
         background_processes: Optional[list[dict[str, Any]]] = None,
         active_delegations: int = 0,
+        main_runtime: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Run gates + judge and update state. Return a decision dict (``status``, ``should_continue``,
         ``continuation_prompt``, ``verdict``, ``reason``, ``message``). Both real user prompts and our
@@ -1511,6 +1514,7 @@ class GoalManager:
         verdict, reason, parse_failed, wait_directive, transport_failed = judge_goal(
             state.goal, last_response, subgoals=state.subgoals or None, background_processes=background_processes,
             contract=state.contract if state.has_contract() else None, active_delegations=active_delegations,
+            main_runtime=main_runtime,
         )
         state.last_verdict = verdict
         state.last_reason = reason

@@ -2477,6 +2477,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 
 
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
+    from hermes_cli.route_controls import runtime_agent_controls
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
     return AIAgent(
@@ -2494,6 +2495,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         prefill_messages=setup.prefill_messages,
         fallback_model=setup.fallback_model,
         credential_pool=setup.credential_pool,
+        **runtime_agent_controls(runtime),
         providers_allowed=pr.get("only"),
         providers_ignored=pr.get("ignore"),
         providers_order=pr.get("order"),

@@ -213,6 +213,10 @@ class GatewayInboundMixin(
             return None
 
         if is_internal:
+            from gateway.process_completions import refresh_process_event
+            if not refresh_process_event(event, session_key=self._session_key_for_source(source)):
+                event._gateway_accepted = True
+                return None
             return event, source, True
         if getattr(event, "_fifo_only", False):  # a slash command's queued turn: its command passed ingress
             return event, source, False
@@ -845,6 +849,9 @@ class GatewayInboundMixin(
         """Fast-path while this session's agent is running: interrupt by default (minimal latency);
         busy_input_mode queue/steer, subagent and compression protection demote to queue."""
         from gateway.run import _AGENT_PENDING_SENTINEL
+        from gateway.process_completions import route_busy_process_event
+        if route_busy_process_event(self, event, _quick_key):
+            return None
         if getattr(event, "internal", False) and not event.get_command():
             # Main's rule (run_busy's busy handler, which the shared runtime's busy dispatch skips):
             # an internal synthetic event never interrupts or steers the running turn.
@@ -1443,13 +1450,18 @@ class GatewayInboundMixin(
                 )
                 return t("gateway.busy.another_turn_running")
             try:
+                from gateway.run_goals import _consume_goal_main_runtime_snapshot
+                main_runtime = _consume_goal_main_runtime_snapshot(self, _quick_key, _run_generation)
                 await self._run_post_turn_hooks(
                     agent_result=_agent_result, source=source, is_internal=is_internal, event=event,
+                    main_runtime=main_runtime,
                 )
             except Exception as _goal_exc:
                 logger.debug("post-turn hook failed: %s", _goal_exc)
             return _agent_result
         finally:
+            from gateway.run_goals import _consume_goal_main_runtime_snapshot
+            _consume_goal_main_runtime_snapshot(self, _quick_key, _run_generation)
             # One-shot restore (/moa, /model --once) must run on EVERY exit path (success,
             # exception, interrupt); the generation guard makes a displaced turn's finalizer a no-op.
             self._restore_pending_one_turn_model_override(_quick_key, _run_generation)

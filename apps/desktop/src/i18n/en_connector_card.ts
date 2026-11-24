@@ -1,6 +1,7 @@
 import type { Translations } from './types'
 
 export const enConnectorCard: Translations['connectors'] = {
+  updated: 'Updated',
   title: 'Connect your apps',
   connect: 'Connect',
   skip: 'Not now',

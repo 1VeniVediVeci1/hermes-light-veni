@@ -624,7 +624,7 @@ describe('useComposerActions oversized paste rejection', () => {
     return { add, result }
   }
 
-  it('consumes a paste the main process rejects for size instead of inlining it', async () => {
+  it('does not inline a paste rejected by an older shell with a size cap', async () => {
     const { add, result } = renderWithSave(async () => {
       throw new Error(
         "Error invoking remote method 'hermes:savePastedText': Error: savePastedText: text is too large (70000000 bytes; limit 67108864)."

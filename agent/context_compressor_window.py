@@ -9,6 +9,10 @@ from typing import Any, Optional
 from agent.context_compressor_tail import tail_cut_progress_floor
 from agent.prepared_compaction import PreparedCompaction, PreparedSummary
 
+# Tools whose pruned form is a status-aware normalization the summarizer must see instead of the raw body:
+# a clarify result's legacy "no user available, use your own judgment" notices read as user instructions.
+_NORMALIZED_SUMMARY_TOOLS = frozenset({"clarify"})
+
 
 def _restart_probe_extra() -> int:
     from agent.context_compressor import _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES
@@ -85,6 +89,33 @@ class CompactionWindowMixin:
         working = self._drop_blank_echoes(working)
         compress_start, compress_end = self._compress_window(working)
         return working, pruned_count, compress_start, compress_end
+
+    @staticmethod
+    def _with_source_tool_bodies(
+        turns: list[dict[str, Any]], source: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Summarizer rows carrying the original tool-result bodies the prune replaced with one-line receipts.
+
+        The window is planned on the pruned copy, but a receipt (``ran `cmd` -> exit 0, 12 lines output``)
+        leaves the summary nothing to carry forward and the model re-runs the call after compaction. The
+        serializer already bounds each body and the whole input, so the original text is what it should see.
+        Rows whose source body is not plain text, or was deduplicated, keep their pruned form, as do tools
+        whose pruned form is a deliberate normalization rather than a receipt (``_NORMALIZED_SUMMARY_TOOLS``)."""
+        from agent.context_compressor import _tool_calls_by_id
+
+        tool_names = _tool_calls_by_id(source)
+        originals = {
+            m.get("tool_call_id"): m.get("content") for m in source
+            if m.get("role") == "tool" and m.get("tool_call_id") and isinstance(m.get("content"), str)
+            and tool_names.get(str(m.get("tool_call_id")), ("",))[0] not in _NORMALIZED_SUMMARY_TOOLS
+        }
+        restored = []
+        for msg in turns:
+            body = originals.get(msg.get("tool_call_id")) if msg.get("role") == "tool" else None
+            if body and body != msg.get("content") and not body.startswith("[Duplicate tool output"):
+                msg = {**msg, "content": body}
+            restored.append(msg)
+        return restored
 
     def _take_prepared_summary(
         self, messages: list[dict[str, Any]], compress_start: int, *, fresh: bool, provider_context: bool,

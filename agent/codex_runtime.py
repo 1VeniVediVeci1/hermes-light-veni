@@ -1279,6 +1279,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 watchdog_state.last_event_ts = now
                 if has_progress:
                     first_progress = watchdog_state.last_progress_ts is None
+                    if getattr(watchdog_state, "first_progress_ts", None) is None:
+                        watchdog_state.first_progress_ts = now
                     watchdog_state.last_progress_ts = now
                     if watchdog_state.phase_aware:
                         watchdog_state.retry_started_ts = None

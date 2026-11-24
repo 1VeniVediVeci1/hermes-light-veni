@@ -4,6 +4,10 @@ import type { TranslationOverrides } from './define-locale'
 export const arAssistant = {
   assistant: {
     mcpSetup: {
+      updateTitle: 'تحديث خوادم MCP',
+      updateAction: 'تحديث',
+      updateSetup: server => `تحديث ${server}`,
+      updated: server => `تم تحديث ${server}`,
       launchCommand: target => `يشغّل: ${target}`,
       launchRemote: target => `يتصل بـ: ${target}`,
       launchEnv: keys => `متغيرات البيئة: ${keys}`,

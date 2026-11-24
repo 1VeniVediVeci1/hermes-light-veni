@@ -11,10 +11,10 @@ type Attachment = CanonicalGroupAttachment
 interface DownloadedAttachment extends Attachment { data_base64: string }
 export interface CanonicalGroupUploader { upload: (files: File[]) => void }
 
-export async function fetchCanonicalGroupAttachment(binding: CanonicalGroupBinding, eventId: string, attachmentId: string) {
+export async function fetchCanonicalGroupAttachment(binding: CanonicalGroupBinding, eventId: string, attachmentId: string, timeoutMs?: number) {
   const result = await canonicalGroupRequest<DownloadedAttachment>(binding, 'groups.attachment.download', {
     room_id: binding.roomId, event_id: eventId, attachment_id: attachmentId
-  })
+  }, timeoutMs)
 
   return { name: result.name, mime: result.mime, bytes: Uint8Array.from(atob(result.data_base64), char => char.charCodeAt(0)) }
 }

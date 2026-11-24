@@ -83,6 +83,7 @@ export const arOverrides = {
     back: 'العودة إلى النتائج'
   },
   connectors: {
+    updated: 'تم التحديث',
     directory: {
       suggested: 'مقترحة',
       allApps: 'كل التطبيقات',

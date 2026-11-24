@@ -21,12 +21,14 @@ async def attach_bytes(connection, ref, params):
 
 
 def _stage(directory, params):
+    from hermes_cli.attachment_limits import attachment_size_cap
     from tui_gateway.prompt_attachments import (
         _ATTACH_BYTES_MAX_BYTES, _decode_attach_base64, _sniff_image_ext, stage_image_bytes,
     )
     try:
         data = _decode_attach_base64(params.get('content_base64') or params.get('data') or '',
-                                     mime_prefix='image/', max_bytes=_ATTACH_BYTES_MAX_BYTES)
+                                     mime_prefix='image/',
+                                     max_bytes=attachment_size_cap(_ATTACH_BYTES_MAX_BYTES))
     except OverflowError as exc:
         raise RuntimeStoreError('invalid_params') from exc
     if not data:
