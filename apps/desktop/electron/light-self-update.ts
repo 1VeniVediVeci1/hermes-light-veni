@@ -124,8 +124,8 @@ async function stageRelease(root: string, release: LightRelease, system32: strin
   }
 }
 
-// All variable paths arrive as separate -File arguments; they never become PowerShell source.
-const SWAP_SCRIPT = String.raw`param([int]$AppPid, [string]$InstallDir, [string]$Tag)
+// Variable paths arrive through the environment; they never become PowerShell source or cmd text.
+const SWAP_SCRIPT = String.raw`param([int]$AppPid = $env:HERMES_LIGHT_SWAP_PID, [string]$InstallDir = $env:HERMES_LIGHT_SWAP_DIR, [string]$Tag = $env:HERMES_LIGHT_SWAP_TAG)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'payload\HermesLight'
 $zip = Join-Path $PSScriptRoot 'HermesLight-win-x64.zip'
@@ -270,10 +270,25 @@ async function checkForUpdate({ window, isQuitting, quitForHandoff, log }: Light
   const script = path.join(stage, 'swap.ps1')
   await writeFile(script, SWAP_SCRIPT)
   if (isQuitting()) return
-  const child = spawn(path.join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
-    '-File', script, String(process.pid), installDir, release.tag
-  ], { cwd: stage, detached: true, windowsHide: true, stdio: 'ignore' })
+  // A detached powershell.exe has no console and exits 0 without running the script, while a
+  // non-detached child dies with Electron's job object. `start` gives it a fresh console outside
+  // that job. Paths travel in the environment so cmd never parses them (only the stage path does).
+  const powershell = path.join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const command = `start "" /min "${powershell}" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden ` +
+    `-ExecutionPolicy Bypass -File "${script}"`
+  const child = spawn(path.join(system32, 'cmd.exe'), ['/d', '/s', '/c', `"${command}"`], {
+    cwd: stage,
+    detached: true,
+    windowsHide: true,
+    windowsVerbatimArguments: true,
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      HERMES_LIGHT_SWAP_PID: String(process.pid),
+      HERMES_LIGHT_SWAP_DIR: installDir,
+      HERMES_LIGHT_SWAP_TAG: release.tag
+    }
+  })
   child.on('error', error => log(`[light-update] updater launch failed: ${error}`))
   child.once('spawn', () => {
     child.unref()
