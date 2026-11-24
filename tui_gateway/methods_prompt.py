@@ -1145,11 +1145,17 @@ def _(rid, params: dict) -> dict:
         return err
     raw, data_url, name = (
         str(params.get(k, "") or "").strip() for k in ("path", "data_url", "name"))
-    if not raw and not data_url:
+    staged_upload = params.get("staged_upload")
+    if staged_upload is None and not raw and not data_url:
         return _err(rid, 4015, "path or data_url required")
     try:
-        stored_path, uploaded = _stage_session_file_attachment(
-            session, raw_path=raw, data_url=data_url, name=name)
+        if staged_upload is not None:
+            # Local change: a remote native Desktop / Webapp pick uploaded over HTTP
+            # (/api/chat/file-upload). Only the receipt is read, never path/data_url.
+            stored_path, uploaded = _stage_browser_file_attachment(session, staged_upload, name)
+        else:
+            stored_path, uploaded = _stage_session_file_attachment(
+                session, raw_path=raw, data_url=data_url, name=name)
         ref_path = _attachment_ref_path(session, stored_path)
         return _ok(rid, {
             "attached": True, "name": stored_path.name, "path": str(stored_path),

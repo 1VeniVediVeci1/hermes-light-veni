@@ -821,7 +821,7 @@ from hermes_cli.web_server_surface import route_on as _route_on
 
 app.include_router(_files_routes.router)
 # The Webapp's routes exist only on the surfaces whose policy names them (404 elsewhere).
-app.include_router(_upload_routes.router, dependencies=[_Depends(_route_on("browser_files"))])
+app.include_router(_upload_routes.router, dependencies=[_Depends(_route_on("chat_file_upload"))])
 app.include_router(_desktop_plugin_routes.router, dependencies=[_Depends(_route_on("desktop_plugins"))])
 app.include_router(_git_routes.router)
 app.include_router(_local_models_routes.router)

@@ -54,6 +54,10 @@ class SurfacePolicy:
     #: ``/api/gateway-connections`` serves: the browser's door to this machine's saved gateways list
     #: (native Desktop reaches the same file through its main process, not over HTTP).
     gateway_connections: bool = False
+    #: ``/api/chat/file-upload`` stages a picked file. Native Desktop on a remote gateway (a
+    #: dashboard/serve surface) posts its attachments here too, so their bytes never ride the
+    #: gateway WebSocket. Authenticated like every other API route (local change).
+    chat_file_upload: bool = True
 
 
 POLICIES: dict[str, SurfacePolicy] = {
