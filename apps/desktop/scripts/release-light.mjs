@@ -57,7 +57,8 @@ runLoud('git', [
 
 if (!skipBuild) {
   fs.rmSync(unpackedDir, { recursive: true, force: true })
-  runLoud(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['run', 'pack'], {
+  // shell: true resolves pnpm whether it is installed as pnpm.cmd or pnpm.exe.
+  runLoud('pnpm', ['run', 'pack'], {
     shell: true,
     env: { ...process.env, HERMES_DESKTOP_VARIANT: 'light', CSC_IDENTITY_AUTO_DISCOVERY: 'false' }
   })
