@@ -453,6 +453,7 @@ import { joinPrimaryBoot, primaryBootRequest, primaryDialClaimKey, primaryProfil
 import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { PrimaryProfilePin, resolveLaunchProfile } from './primary-profile-pin'
 import { connectPrimaryRemote } from './primary-remote-startup'
+import { relaunchLightElevated } from './light-elevation'
 import { createLightSelfUpdater } from './light-self-update'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import { registerProfileBackendIpc } from './profile-backend-ipc'
@@ -765,11 +766,17 @@ function acquireSingleInstanceLock(): boolean {
   return false
 }
 
-const isPrimaryInstance: boolean = acquireSingleInstanceLock()
+// Hermes Light runs as administrator: an unelevated launch hands off to UAC before the lock.
+const elevating: boolean = relaunchLightElevated(PRODUCT_IDENTITY.light, message => console.error(message))
+const isPrimaryInstance: boolean = !elevating && acquireSingleInstanceLock()
 const relauncher = createAppRelauncher(app)
 
 if (!isPrimaryInstance) {
-  console.error('[hermes] another Hermes Desktop instance holds the single-instance lock; exiting')
+  console.error(
+    elevating
+      ? '[hermes] relaunching Hermes Light as administrator; exiting'
+      : '[hermes] another Hermes Desktop instance holds the single-instance lock; exiting'
+  )
   app.exit(0)
 }
 
