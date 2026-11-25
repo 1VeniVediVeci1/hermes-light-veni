@@ -430,6 +430,7 @@ export const esOverrides = {
     installMethodUnsupportedTitle: 'Método de instalación no compatible',
     updateHermes: 'Actualizar Hermes',
     updateReadyTitle: 'Actualización lista',
+    restartAndUpdate: 'Reiniciar y actualizar',
     updateReadyMessage: count => `${count} ${count === 1 ? 'cambio nuevo disponible' : 'cambios nuevos disponibles'}.`,
     updateReadyMessageUnknown: 'Hay una nueva actualización disponible.',
     seeWhatsNew: 'Ver novedades',

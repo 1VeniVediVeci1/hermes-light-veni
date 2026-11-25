@@ -42,6 +42,7 @@ export const arDiagnostics = {
     updateDesktopApp: 'تحديث التطبيق',
     updateHermes: 'تحديث Hermes',
     updateReadyTitle: 'التحديث جاهز',
+    restartAndUpdate: 'إعادة التشغيل والتحديث',
     updateReadyMessage: count => `${count} تغيير جديد متاح.`,
     updateReadyMessageUnknown: 'يتوفر تحديث جديد.',
     seeWhatsNew: 'عرض الجديد',

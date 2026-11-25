@@ -427,6 +427,7 @@ export const deOverrides = {
     installMethodUnsupportedTitle: 'Nicht unterstützte Installationsmethode',
     updateHermes: 'Hermes aktualisieren',
     updateReadyTitle: 'Update bereit',
+    restartAndUpdate: 'Neustarten und aktualisieren',
     updateReadyMessage: count => `${count} neue Änderung${count === 1 ? '' : 'en'} verfügbar.`,
     updateReadyMessageUnknown: 'Ein neues Update ist verfügbar.',
     seeWhatsNew: 'Neues ansehen',

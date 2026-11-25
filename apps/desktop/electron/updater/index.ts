@@ -48,7 +48,7 @@ export function resolveUpdaterMechanism(facts: MechanismFacts): UpdaterMechanism
 /** The status shape main.ts already sends over `hermes:updates:check`. */
 export interface UpdaterStatusWire {
   supported: boolean
-  mechanism?: UpdaterMechanism
+  mechanism?: UpdaterMechanism | 'light-portable'
   updateAvailable?: boolean
   branch?: string
   currentBranch?: string

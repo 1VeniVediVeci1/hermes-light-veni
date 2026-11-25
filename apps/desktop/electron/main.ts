@@ -453,7 +453,7 @@ import { joinPrimaryBoot, primaryBootRequest, primaryDialClaimKey, primaryProfil
 import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { PrimaryProfilePin, resolveLaunchProfile } from './primary-profile-pin'
 import { connectPrimaryRemote } from './primary-remote-startup'
-import { scheduleLightSelfUpdate } from './light-self-update'
+import { createLightSelfUpdater } from './light-self-update'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import { registerProfileBackendIpc } from './profile-backend-ipc'
 import {
@@ -3386,15 +3386,30 @@ function resolveUpdateRoot() {
 
 function emitUpdateProgress(payload) {
   const merged = { stage: 'idle', message: '', percent: null, error: null, ...payload, at: Date.now() }
-  rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
-  desktopMetrics.noteUpdateProgress(merged.stage)
+  if (!merged.status) {
+    rememberLog(`[updates] ${merged.stage}: ${merged.message || merged.error || ''}`)
+    desktopMetrics.noteUpdateProgress(merged.stage)
+  }
 
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send('hermes:updates:progress', merged)
   }
 }
 
+const lightSelfUpdater = createLightSelfUpdater({
+  light: PRODUCT_IDENTITY.light,
+  primary: isPrimaryInstance,
+  onStatus: status => emitUpdateProgress({ status }),
+  isQuitting: () => appQuitting || isQuittingForHandoff,
+  quitForHandoff: () => {
+    isQuittingForHandoff = true
+    app.quit()
+  },
+  log: rememberLog
+})
+
 async function checkUpdates(opts: { force?: boolean } = {}): Promise<UpdaterStatusWire> {
+  if (lightSelfUpdater) return lightSelfUpdater.check(opts)
   // A packaged install delegates to the update owner named by its stamp.
   let strategy: UpdaterStrategy | null = null
 
@@ -13170,17 +13185,7 @@ function createWindow() {
   const revealController = wireWindowReveal(createdMainWindow, {
     onRevealed: () => {
       revealedMainWindows.add(createdMainWindow)
-      scheduleLightSelfUpdate({
-        light: PRODUCT_IDENTITY.light,
-        primary: isPrimaryInstance,
-        window: createdMainWindow,
-        isQuitting: () => appQuitting || isQuittingForHandoff,
-        quitForHandoff: () => {
-          isQuittingForHandoff = true
-          app.quit()
-        },
-        log: rememberLog
-      })
+      lightSelfUpdater?.start()
 
       // Persist geometry as soon as the window is visible so a crash before the
       // first clean resize/move/close still captures the restored bounds (#56726).
@@ -16647,7 +16652,7 @@ ipcMain.handle(
 )
 
 ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
-  applyUpdates().catch(error => ({
+  (lightSelfUpdater ? lightSelfUpdater.apply() : applyUpdates()).catch(error => ({
     ok: false,
     error: 'apply-failed',
     message: error?.message || String(error)

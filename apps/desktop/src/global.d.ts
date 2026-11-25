@@ -1008,7 +1008,7 @@ export interface DesktopUpdateCommit {
 }
 
 export type UpdaterMechanismClient =
-  'app-installer' | 'electron-updater' | 'external' | 'microsoft-store' | 'windows-handoff' | 'posix-handoff' | 'manual'
+  'app-installer' | 'electron-updater' | 'external' | 'microsoft-store' | 'windows-handoff' | 'posix-handoff' | 'manual' | 'light-portable'
 
 export interface DesktopUpdateStatus {
   supported: boolean
@@ -1114,6 +1114,8 @@ export type DesktopUpdateStage =
   | 'error'
 
 export interface DesktopUpdateProgress {
+  /** A background check snapshot, not an apply-progress transition. */
+  status?: DesktopUpdateStatus
   stage: DesktopUpdateStage
   message: string
   percent: number | null

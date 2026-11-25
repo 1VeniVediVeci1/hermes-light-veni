@@ -10,6 +10,8 @@
  * Extracted from updates-overlay.tsx so the wording logic is unit-testable.
  */
 
+import type { UpdaterMechanismClient } from '@/global'
+
 export type UpdateTarget = 'client' | 'backend'
 
 export interface UpdateCopyStrings {
@@ -40,14 +42,7 @@ export interface ResolveUpdateCopyInput {
    * 'app-installer': the OS App Installer owns the apply (out-of-store MSIX)
    * — the body names Windows as the finisher, never commit vocabulary.
    */
-  mechanism?:
-    | 'app-installer'
-    | 'electron-updater'
-    | 'external'
-    | 'microsoft-store'
-    | 'windows-handoff'
-    | 'posix-handoff'
-    | 'manual'
+  mechanism?: UpdaterMechanismClient
   copy: UpdateCopyStrings
 }
 

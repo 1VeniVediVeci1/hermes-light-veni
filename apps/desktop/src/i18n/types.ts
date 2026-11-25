@@ -449,6 +449,7 @@ export interface Translations extends NoticeTranslations {
     installMethodUnsupportedTitle: string
     updateHermes: string
     updateReadyTitle: string
+    restartAndUpdate: string
     updateReadyMessage: (count: number) => string
     updateReadyMessageUnknown: string
     updateReadyMessageAppInstaller: string

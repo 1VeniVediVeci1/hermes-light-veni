@@ -434,16 +434,19 @@ function IdleView({
   const rollbackTag = rollbackRelease(status)
   const channelCopy = t.settings.about.channel
 
-  const { title, body } = rollbackTag
-    ? { title: channelCopy.rollbackTitle(rollbackTag), body: channelCopy.rollbackBody(rollbackTag) }
-    : resolveUpdateCopy({
-        target,
-        shownItems,
-        channel: status?.channel === 'stable' ? 'stable' : 'main',
-        latestTag: updateReleaseTag(status),
-        mechanism: status?.mechanism,
-        copy: u
-      })
+  const lightTag = status.mechanism === 'light-portable' ? status.latestTag : null
+  const { title, body } = lightTag
+    ? { title: t.notifications.updateReadyTitle, body: t.shell.statusbar.releaseAvailable(lightTag) }
+    : rollbackTag
+      ? { title: channelCopy.rollbackTitle(rollbackTag), body: channelCopy.rollbackBody(rollbackTag) }
+      : resolveUpdateCopy({
+          target,
+          shownItems,
+          channel: status?.channel === 'stable' ? 'stable' : 'main',
+          latestTag: updateReleaseTag(status),
+          mechanism: status?.mechanism,
+          copy: u
+        })
 
   const handleCopyFullLog = () => formatFullChangelogText(commits, behind, status.branch)
 
@@ -456,16 +459,18 @@ function IdleView({
         <DialogDescription className="text-center text-sm">{body}</DialogDescription>
       </div>
 
-      <UpdateChangeList
-        commitGroups={groups}
-        copyText={commits.length > 0 ? handleCopyFullLog : undefined}
-        notes={notes}
-        rollback={Boolean(rollbackTag)}
-      />
+      {!lightTag && (
+        <UpdateChangeList
+          commitGroups={groups}
+          copyText={commits.length > 0 ? handleCopyFullLog : undefined}
+          notes={notes}
+          rollback={Boolean(rollbackTag)}
+        />
+      )}
 
       <div className="grid gap-2">
         <Button className="font-semibold" onClick={onInstall} size="lg">
-          {rollbackTag ? channelCopy.rollbackAction(rollbackTag) : u.updateNow}
+          {lightTag ? t.notifications.restartAndUpdate : rollbackTag ? channelCopy.rollbackAction(rollbackTag) : u.updateNow}
         </Button>
         <Button className="font-medium" onClick={onLater} type="button" variant="text">
           {u.maybeLater}

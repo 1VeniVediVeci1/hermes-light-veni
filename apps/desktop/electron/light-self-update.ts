@@ -5,7 +5,9 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
-import { app, dialog, net, type BrowserWindow } from 'electron'
+import { app, net } from 'electron'
+
+import type { UpdaterApplyResultWire, UpdaterStatusWire } from './updater'
 
 const REPO = '1VeniVediVeci1/hermes-light-veni'
 const ASSET = 'HermesLight-win-x64.zip'
@@ -206,26 +208,101 @@ try { Remove-Item -LiteralPath $zip -Force } catch { Write-Log "ZIP cleanup fail
 interface LightUpdateOptions {
   light: boolean
   primary: boolean
-  window: BrowserWindow
   isQuitting: () => boolean
   quitForHandoff: () => void
+  onStatus: (status: UpdaterStatusWire) => void
   log: (message: string) => void
 }
 
-let scheduled = false
-
-export function scheduleLightSelfUpdate(options: LightUpdateOptions): void {
-  if (scheduled || process.platform !== 'win32' || !app.isPackaged || !options.light || !options.primary) return
-  if (process.env.HERMES_LIGHT_DISABLE_UPDATES === '1') return
-  scheduled = true
-  setTimeout(() => {
-    void checkForUpdate(options).catch(error => options.log(`[light-update] ${error}`))
-  }, 4_000).unref()
+interface StagedUpdate {
+  tag: string
+  stage: string
+  installDir: string
+  system32: string
 }
 
-async function checkForUpdate({ window, isQuitting, quitForHandoff, log }: LightUpdateOptions): Promise<void> {
-  const ownTag = await readOwnTag()
-  if (ownTag === null || isQuitting()) return
+const RECHECK_MS = 6 * 60 * 60 * 1000
+
+export function createLightSelfUpdater({ light, primary, isQuitting, quitForHandoff, onStatus, log }: LightUpdateOptions) {
+  if (process.platform !== 'win32' || !app.isPackaged || !light || !primary) return null
+  if (process.env.HERMES_LIGHT_DISABLE_UPDATES === '1') return null
+
+  let pending: StagedUpdate | null = null
+  let checking: Promise<void> | null = null
+  let applying = false
+  let status: UpdaterStatusWire = { supported: true, mechanism: 'light-portable', updateAvailable: false }
+
+  async function refresh(): Promise<void> {
+    const ownTag = await readOwnTag()
+    if (ownTag === null) {
+      if (status.supported) {
+        status = { ...status, supported: false }
+        onStatus(status)
+      }
+      return
+    }
+    if (isQuitting()) return
+    // Keep checking the release feed with a pending offer, but never stage its tag again.
+    const release = await findNewRelease(pending?.tag ?? ownTag)
+    if (applying || isQuitting()) return
+    if (!release) {
+      status = { ...status, fetchedAt: Date.now() }
+      return
+    }
+
+    const candidate = await prepareUpdate(release, log)
+    if (applying || isQuitting()) return
+    pending = candidate
+    status = { ...status, supported: true, updateAvailable: true, latestTag: candidate.tag, fetchedAt: Date.now() }
+    onStatus(status)
+    // Only clean up after the new stage is ready and owns the offer, so a failed
+    // download never invalidates the previous offer or races an apply of it.
+    await pruneOlderStages(path.dirname(candidate.stage), candidate.tag, log)
+  }
+
+  async function check({ force = false } = {}): Promise<UpdaterStatusWire> {
+    if (force && !applying && !isQuitting()) {
+      checking ??= refresh()
+        .catch(error => log(`[light-update] ${error}`))
+        .finally(() => { checking = null })
+      await checking
+    }
+    return status
+  }
+
+  let started = false
+  function start(): void {
+    if (started) return
+    started = true
+    const tick = () => {
+      if (!checking) void check({ force: true })
+    }
+    setTimeout(() => {
+      tick()
+      setInterval(tick, RECHECK_MS).unref()
+    }, 4_000).unref()
+  }
+
+  async function apply(): Promise<UpdaterApplyResultWire> {
+    if (applying || isQuitting()) return { ok: false, error: 'update-in-flight' }
+    if (!pending) return { ok: true, updateAvailable: false }
+    applying = true
+    try {
+      if (!await launchSwap(pending, isQuitting)) return { ok: false, error: 'app-quitting' }
+      quitForHandoff()
+      return { ok: true, handedOff: true }
+    } catch (error) {
+      log(`[light-update] updater launch failed: ${error}`)
+      return { ok: false, error: 'apply-failed' }
+    } finally {
+      applying = false
+    }
+  }
+
+  return { start, check, apply }
+}
+
+async function findNewRelease(ownTag: string): Promise<LightRelease | null> {
   const response = await net.fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
     headers: { ...HEADERS, Accept: 'application/vnd.github+json' },
     credentials: 'omit',
@@ -233,9 +310,10 @@ async function checkForUpdate({ window, isQuitting, quitForHandoff, log }: Light
     signal: AbortSignal.timeout(15_000)
   })
   if (!response.ok) throw new Error(`Latest release check: HTTP ${response.status}`)
-  const release = selectLightRelease(await response.json(), ownTag)
-  if (!release || isQuitting()) return
+  return selectLightRelease(await response.json(), ownTag)
+}
 
+async function prepareUpdate(release: LightRelease, log: LightUpdateOptions['log']): Promise<StagedUpdate> {
   const installDir = await realpath(path.dirname(process.execPath))
   const root = path.join(await realpath(app.getPath('temp')), 'HermesLightUpdate')
   const userData = await realpath(app.getPath('userData'))
@@ -246,30 +324,23 @@ async function checkForUpdate({ window, isQuitting, quitForHandoff, log }: Light
   const system32 = path.join(process.env.SystemRoot, 'System32')
   await mkdir(root, { recursive: true })
   if (!(await lstat(root)).isDirectory()) throw new Error('Invalid update cache directory')
+  const stage = await stageRelease(root, release, system32, log)
+  return { tag: release.tag, stage, installDir, system32 }
+}
+
+async function pruneOlderStages(root: string, tag: string, log: LightUpdateOptions['log']): Promise<void> {
   for (const entry of await readdir(root, { withFileTypes: true })) {
     const stagedTag = STAGE_NAME.exec(entry.name)?.[1]
-    if (entry.isDirectory() && stagedTag && stagedTag < release.tag) {
+    if (entry.isDirectory() && stagedTag && stagedTag < tag) {
       await rm(path.join(root, entry.name), { recursive: true, force: true }).catch(error => log(`[light-update] ${error}`))
     }
   }
-  const stage = await stageRelease(root, release, system32, log)
-  if (isQuitting()) return
-  const message = {
-    type: 'question' as const,
-    title: 'Hermes Light 更新',
-    message: `发现新版本 ${release.tag}，已下载完成。现在重启并更新？`,
-    buttons: ['重启并更新', '稍后'],
-    defaultId: 1,
-    cancelId: 1
-  }
-  const { response: choice } = !window.isDestroyed() && window.isVisible() && !window.isMinimized()
-    ? await dialog.showMessageBox(window, message)
-    : await dialog.showMessageBox(message)
-  if (choice !== 0 || isQuitting()) return
+}
 
+async function launchSwap({ stage, installDir, system32, tag }: StagedUpdate, isQuitting: () => boolean): Promise<boolean> {
   const script = path.join(stage, 'swap.ps1')
   await writeFile(script, SWAP_SCRIPT)
-  if (isQuitting()) return
+  if (isQuitting()) return false
   // A detached powershell.exe has no console and exits 0 without running the script, while a
   // non-detached child dies with Electron's job object. `start` gives it a fresh console outside
   // that job. Paths travel in the environment so cmd never parses them (only the stage path does).
@@ -286,12 +357,14 @@ async function checkForUpdate({ window, isQuitting, quitForHandoff, log }: Light
       ...process.env,
       HERMES_LIGHT_SWAP_PID: String(process.pid),
       HERMES_LIGHT_SWAP_DIR: installDir,
-      HERMES_LIGHT_SWAP_TAG: release.tag
+      HERMES_LIGHT_SWAP_TAG: tag
     }
   })
-  child.on('error', error => log(`[light-update] updater launch failed: ${error}`))
-  child.once('spawn', () => {
-    child.unref()
-    quitForHandoff()
+  return new Promise((resolve, reject) => {
+    child.on('error', reject)
+    child.once('spawn', () => {
+      child.unref()
+      resolve(true)
+    })
   })
 }

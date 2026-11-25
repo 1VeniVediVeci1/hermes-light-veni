@@ -1640,6 +1640,43 @@ describe('startUpdatePoller', () => {
     expect($updateStatus.get()?.behind).toBe(5)
   })
 
+  it('shows the newest Light offer in one bottom-right toast and applies it to the client', async () => {
+    const apply = vi.fn().mockResolvedValue({ ok: true, handedOff: true })
+    window.hermesDesktop!.updates!.apply = apply
+    const ready = (latestTag: string) => ({
+      supported: true, mechanism: 'light-portable', updateAvailable: true, latestTag
+    } satisfies DesktopUpdateStatus)
+    const earlier = ready('light-20261124-000000')
+    const newer = ready('light-20261124-060000')
+    checkMock.mockResolvedValue({ supported: true, mechanism: 'light-portable', updateAvailable: false })
+    notifySpy.mockClear()
+    startUpdatePoller()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const push = onProgressMock.mock.calls[0][0]
+    for (const status of [earlier, newer]) push({ status })
+    checkMock.mockResolvedValueOnce(earlier)
+    expect(await checkUpdates()).toEqual(newer)
+    checkMock.mockResolvedValueOnce(newer)
+    await checkUpdates()
+    expect($updateApply.get().applying).toBe(false)
+    expect(notifySpy).toHaveBeenCalledTimes(2)
+    expect(notifySpy.mock.calls[0][0].id).toBe(notifySpy.mock.calls[1][0].id)
+    expect(notifySpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      placement: 'bottom-right', message: expect.stringContaining(newer.latestTag),
+      action: expect.objectContaining({ label: en.notifications.restartAndUpdate })
+    }))
+    try {
+      lastToast().action.onClick()
+      expect(apply).toHaveBeenCalledTimes(1)
+      expect($updateOverlayTarget.get()).toBe('client')
+      await vi.advanceTimersByTimeAsync(0)
+    } finally {
+      $updateOverlayOpen.set(false)
+      resetUpdateApplyState()
+    }
+  })
+
   it('polls once per day and never forces past the caches', async () => {
     startUpdatePoller()
     await vi.advanceTimersByTimeAsync(0)

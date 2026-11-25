@@ -316,6 +316,23 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, t
     return
   }
 
+  if (target === 'client' && status.mechanism === 'light-portable' && status.latestTag) {
+    notify({
+      action: {
+        label: translateNow('notifications.restartAndUpdate'),
+        onClick: () => startActiveUpdate('client')
+      },
+      durationMs: 0,
+      icon: 'gift',
+      id: UPDATE_TOAST_ID,
+      kind: 'info',
+      message: translateNow('shell.statusbar.releaseAvailable', status.latestTag),
+      placement: 'bottom-right',
+      title: translateNow('notifications.updateReadyTitle')
+    })
+    return
+  }
+
   if (isUpdateToastSnoozed()) {
     return
   }
@@ -640,6 +657,23 @@ export async function checkBackendUpdates({
   }
 }
 
+function publishClientUpdateStatus(status: DesktopUpdateStatus): DesktopUpdateStatus {
+  const previous = $updateStatus.get()
+  if (status.mechanism === 'light-portable' && previous?.mechanism === 'light-portable' && previous.latestTag) {
+    // A check reply can arrive after a newer push. Do not regress the offer
+    // or re-toast an unchanged tag the user may already have dismissed.
+    if (!status.latestTag || status.latestTag < previous.latestTag) return previous
+    if (status.latestTag === previous.latestTag) {
+      $updateStatus.set(status)
+      return status
+    }
+  }
+  $updateStatus.set(status)
+  if (status.retirement) maybeNotifyDiscontinued(status.retirement)
+  maybeNotifyUpdateAvailable(status, 'client')
+  return status
+}
+
 export async function checkUpdates({ force = false }: UpdateCheckOptions = {}): Promise<DesktopUpdateStatus | null> {
   const bridge = window.hermesDesktop?.updates
 
@@ -650,14 +684,7 @@ export async function checkUpdates({ force = false }: UpdateCheckOptions = {}): 
   $updateChecking.set(true)
 
   try {
-    const status = await bridge.check({ force })
-    $updateStatus.set(status)
-
-    if (status.retirement) {
-      maybeNotifyDiscontinued(status.retirement)
-    }
-
-    maybeNotifyUpdateAvailable(status, 'client')
+    const status = publishClientUpdateStatus(await bridge.check({ force }))
     void refreshDesktopVersion()
 
     return status
@@ -1337,6 +1364,10 @@ async function runEverythingUpdate(): Promise<void> {
 }
 
 function ingestProgress(payload: DesktopUpdateProgress): void {
+  if (payload.status) {
+    publishClientUpdateStatus(payload.status)
+    return
+  }
   const current = $updateApply.get()
   const entry = { stage: payload.stage, message: payload.message, at: payload.at }
   const log = [...current.log, entry].slice(-UPDATE_LOG_LINES)

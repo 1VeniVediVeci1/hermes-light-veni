@@ -21,6 +21,7 @@ export const zhHantDiagnostics = {
     installMethodUnsupportedTitle: '不受支援的安裝方式',
     updateHermes: '更新 Hermes',
     updateReadyTitle: '有可用更新',
+    restartAndUpdate: '重新啟動並更新',
     updateReadyMessage: count => `有 ${count} 項新變更可用。`,
     updateReadyMessageUnknown: '有新更新可用。',
     seeWhatsNew: '查看新增內容',
