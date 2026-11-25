@@ -50,7 +50,15 @@ class ProcessCompletionBatch:
             return False
         # Only a canonical compression continuation may receive the original
         # owner's result. /new, resume, a copied prefix or a sibling cannot rebind it.
+        from persistence_assembly import Persistence
+
         try:
+            if isinstance(session_db, Persistence):
+                parent = session_db.sessions.get(self.parent_session_id)
+                target = session_db.sessions.get(session_id)
+                return (parent is not None and parent.end_reason == "compression"
+                        and target is not None and target.ended_at is None
+                        and session_db.lineage.tip(self.parent_session_id) == session_id)
             parent = session_db.get_session(self.parent_session_id)
             target = session_db.get_session(session_id)
             return (isinstance(parent, dict) and parent.get("end_reason") == "compression"
