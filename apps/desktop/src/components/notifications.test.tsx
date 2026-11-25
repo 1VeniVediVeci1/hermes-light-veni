@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { clearNotifications, notify } from '@/store/notifications'
 import { stubResizeObserver } from '@/test/jsdom'
@@ -16,6 +16,24 @@ describe('toast titles', () => {
   afterEach(() => {
     cleanup()
     clearNotifications()
+  })
+
+  it('keeps an action card mounted as it turns into download progress', async () => {
+    const card = { id: 'update', title: 'Update available', message: 'Version 2 is available.', placement: 'bottom-right' } as const
+    const onDismiss = vi.fn()
+    notify({ ...card, onDismiss, action: {
+      label: 'Download and update', keepOpen: true,
+      onClick: () => notify({ ...card, title: 'Downloading…', progress: 42, meta: '42% · 8.3 MB/s', onDismiss })
+    } })
+    render(<NotificationStack />)
+    fireEvent.click(screen.getByRole('button', { name: 'Download and update' }))
+    const bar = screen.getByRole('progressbar', { name: 'Downloading…' })
+    expect(bar.getAttribute('aria-valuenow')).toBe('42')
+    expect(screen.getByText('42% · 8.3 MB/s')).toBeTruthy()
+    expect(onDismiss).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+    await waitFor(() => expect(screen.queryByRole('progressbar')).toBeNull())
+    expect(onDismiss).toHaveBeenCalledOnce()
   })
 
   it.each(['default', 'bottom-right'] as const)(

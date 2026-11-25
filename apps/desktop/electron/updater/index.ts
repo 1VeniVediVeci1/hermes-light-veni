@@ -49,6 +49,10 @@ export function resolveUpdaterMechanism(facts: MechanismFacts): UpdaterMechanism
 export interface UpdaterStatusWire {
   supported: boolean
   mechanism?: UpdaterMechanism | 'light-portable'
+  /** Light apply activity, included in both check snapshots and IPC pushes. */
+  lightProgress?:
+    | { stage: 'fetch'; percent: number; bytesPerSecond: number }
+    | { stage: 'prepare' | 'restart' }
   updateAvailable?: boolean
   branch?: string
   currentBranch?: string

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { CardStack, type CardStackAction } from '@/components/ui/card-stack'
 import { Codicon } from '@/components/ui/codicon'
 import { CopyButton } from '@/components/ui/copy-button'
+import { Progress } from '@/components/ui/progress'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { AlertCircle, AlertTriangle, CheckCircle2, type IconComponent, Info } from '@/lib/icons'
@@ -279,7 +280,7 @@ function NotificationItem({ notification, stack }: { notification: AppNotificati
 
   return (
     <Alert
-      aria-live={!stack.active ? 'off' : notification.kind === 'error' ? 'assertive' : 'polite'}
+      aria-live={!stack.active || typeof notification.progress === 'number' ? 'off' : notification.kind === 'error' ? 'assertive' : 'polite'}
       className="grid-cols-[auto_minmax(0,1fr)_auto] border-0 bg-transparent pr-2.5 text-xs shadow-none"
       role={notification.kind === 'error' ? 'alert' : 'status'}
       variant={styles.variant}
@@ -298,6 +299,14 @@ function NotificationItem({ notification, stack }: { notification: AppNotificati
         <AlertDescription className="col-start-auto">
           <p className="m-0 wrap-break-word">{renderMessage(notification.message, accent)}</p>
           {notification.meta && <p className="m-0 text-xs text-muted-foreground tabular-nums">{notification.meta}</p>}
+          {notification.progress !== undefined && (
+            <Progress
+              aria-label={notification.title ?? notification.message}
+              className="mt-1.5"
+              indeterminate={notification.progress === null}
+              value={(notification.progress ?? 0) / 100}
+            />
+          )}
           {hasDetail && <NotificationDetail detail={notification.detail || ''} />}
           {(notification.action || notification.secondaryAction) && (
             <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -305,10 +314,14 @@ function NotificationItem({ notification, stack }: { notification: AppNotificati
                 <Button
                   disabled={stack.busy || !stack.active}
                   onClick={() => {
-                    void stack.depart(() => {
-                      notification.action?.onClick()
-                      dismissNotification(notification.id)
-                    })
+                    if (notification.action?.keepOpen) {
+                      notification.action.onClick()
+                    } else {
+                      void stack.depart(() => {
+                        notification.action?.onClick()
+                        dismissNotification(notification.id)
+                      })
+                    }
                   }}
                   size="sm"
                   type="button"

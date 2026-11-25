@@ -146,7 +146,7 @@ function setup() {
   }
 }
 
-function flushDeferredHide() {
+function nextTurn() {
   return new Promise<void>(resolve => setImmediate(resolve))
 }
 
@@ -162,17 +162,34 @@ function restorePlatform() {
   }
 }
 
-test('tray hide defers past the minimize dispatch (#119252)', async () => {
-  const { controller, main } = setup()
-  await controller.start()
-  await controller.setEnabled(true)
+test.each(['win32', 'darwin'])('with the tray enabled, only primary Close hides (%s)', async platform => {
+  setPlatform(platform)
 
-  // Hiding synchronously inside the minimize dispatch wedges the native
-  // minimized flag on Windows; hide must run after dispatch returns.
-  main.minimize()
-  expect(main.visible).toBe(true)
-  await flushDeferredHide()
-  expect(main.visible).toBe(false)
+  try {
+    const { controller, main, peer } = setup()
+    await controller.start()
+    await controller.setEnabled(true)
+
+    main.minimize()
+    peer.minimize()
+    await nextTurn()
+    expect(main.minimized && peer.minimized).toBe(true)
+    expect(main.visible && peer.visible).toBe(true)
+    expect(main.skipped || peer.skipped).toBe(false)
+
+    main.restore()
+    expect(main.close().preventDefault).toHaveBeenCalledOnce()
+    expect(main.visible).toBe(false)
+    expect(main.destroyed).toBe(false)
+    if (platform === 'darwin') {
+      // A normally minimized peer must still be reachable from the Dock.
+      expect(native.app.dock.hide).not.toHaveBeenCalled()
+    }
+    expect(peer.close().preventDefault).not.toHaveBeenCalled()
+    expect(peer.destroyed).toBe(true)
+  } finally {
+    restorePlatform()
+  }
 })
 
 test('Windows restore re-activates the window instead of showInactive (#119252)', async () => {
@@ -183,9 +200,9 @@ test('Windows restore re-activates the window instead of showInactive (#119252)'
     await controller.start()
     await controller.setEnabled(true)
 
-    main.minimize()
-    await flushDeferredHide()
-    controller.restore()
+    main.close()
+    expect(main.visible).toBe(false)
+    native.trays[0].emit('click')
     expect(main.visible).toBe(true)
     expect(main.minimized).toBe(false)
     expect(main.skipped).toBe(false)
@@ -203,8 +220,7 @@ test('Windows restore of a tray-hidden window by any other path activates it (#1
     await controller.start()
     await controller.setEnabled(true)
 
-    main.minimize()
-    await flushDeferredHide()
+    main.close()
 
     const show = vi.spyOn(main, 'show')
     const focus = vi.spyOn(main, 'focus')
@@ -213,7 +229,7 @@ test('Windows restore of a tray-hidden window by any other path activates it (#1
     // restore() alone leaves a painted window that is not the OS foreground
     // window, so it drops all input. It needs show() then focus().
     main.restore()
-    await flushDeferredHide()
+    await nextTurn()
     expect(show).toHaveBeenCalledOnce()
     expect(focus).toHaveBeenCalledOnce()
     expect(main.skipped).toBe(false)
@@ -233,7 +249,7 @@ test('a restore of a window the tray never hid is left alone', async () => {
 
     main.minimize()
     main.restore()
-    await flushDeferredHide()
+    await nextTurn()
     expect(show).not.toHaveBeenCalled()
     expect(focus).not.toHaveBeenCalled()
   } finally {
@@ -266,20 +282,7 @@ test('Windows tray hide releases keyboard focus before hiding (#126570)', async 
   }
 })
 
-test('a restore before the deferred hide fires cancels the stale hide', async () => {
-  const { controller, main } = setup()
-  await controller.start()
-  await controller.setEnabled(true)
-
-  main.minimize()
-  // User restores (taskbar/shortcut) before the deferred hide fires.
-  main.restore()
-  await flushDeferredHide()
-  expect(main.visible).toBe(true)
-  expect(main.minimized).toBe(false)
-})
-
-test('opt-in minimize and primary Close preserve windows while explicit Quit still exits', async () => {
+test('primary Close preserves windows while explicit Quit still exits', async () => {
   const { controller, main, peer } = setup()
   expect(await controller.start()).toEqual({ enabled: false, available: false })
   main.minimize()
@@ -287,8 +290,7 @@ test('opt-in minimize and primary Close preserve windows while explicit Quit sti
   main.restore()
   await native.ipc.get('hermes:minimize-to-tray:set')!(null, true)
   expect(native.ipc.get('hermes:minimize-to-tray:get')!()).toEqual({ enabled: true, available: true })
-  main.minimize()
-  await flushDeferredHide()
+  main.close()
   expect(main.destroyed).toBe(false)
   expect(main.visible).toBe(false)
   expect(peer.visible).toBe(true)
@@ -297,33 +299,21 @@ test('opt-in minimize and primary Close preserve windows while explicit Quit sti
     expect(native.app.dock.hide).not.toHaveBeenCalled()
   }
 
-  peer.minimize()
-  await flushDeferredHide()
-  expect(peer.visible).toBe(false)
-
+  peer.close()
   if (process.platform === 'darwin') {
     expect(native.app.dock.hide).toHaveBeenCalled()
   }
 
   if (process.platform === 'win32') {
-    expect(main.skipped && peer.skipped).toBe(true)
+    expect(main.skipped).toBe(true)
   }
 
-  native.trays[0].menu[0].click()
-  expect(main.visible && peer.visible).toBe(true)
-  expect(main.minimized || peer.minimized).toBe(false)
-  expect(main.skipped || peer.skipped).toBe(false)
-  peer.close()
-  expect(peer.destroyed).toBe(true)
-  main.minimize()
   native.trays[0].menu[2].click()
   expect(native.app.quit).toHaveBeenCalledOnce()
   // A cancelled guard doesn't call beginQuit; hide remains enabled.
-  controller.restore()
-  main.minimize()
-  await flushDeferredHide()
-  expect(main.destroyed).toBe(false)
-  expect(main.visible).toBe(false)
+  native.trays[0].menu[0].click()
+  expect(main.visible).toBe(true)
+  expect(main.skipped).toBe(false)
   // X/Alt+F4 hides the primary, but an accepted explicit quit closes it.
   expect(main.close().preventDefault).toHaveBeenCalledOnce()
   expect(main.destroyed).toBe(false)
@@ -346,8 +336,7 @@ test('linux reuses one tray when minimize-to-tray is toggled off and on (#126353
     await controller.start()
     await controller.setEnabled(true)
     expect(native.trays).toHaveLength(1)
-    main.minimize()
-    await flushDeferredHide()
+    main.close()
     expect(main.visible).toBe(false)
 
     await controller.setEnabled(false)
@@ -358,8 +347,7 @@ test('linux reuses one tray when minimize-to-tray is toggled off and on (#126353
     await controller.setEnabled(true)
     expect(native.trays).toHaveLength(1)
     expect(native.trays[0].destroyed).toBe(false)
-    main.minimize()
-    await flushDeferredHide()
+    main.close()
     expect(main.visible).toBe(false)
     native.trays[0].menu[0].click()
     expect(main.visible).toBe(true)
@@ -372,7 +360,8 @@ test('persistence, disabling, failed tray creation, and handoff never strand hid
   const first = setup()
   await first.controller.start()
   await first.controller.setEnabled(true)
-  first.main.minimize()
+  first.main.close()
+  expect(first.main.visible).toBe(false)
   await first.controller.setEnabled(false)
   expect(first.main.visible).toBe(true)
   // Linux parks the tray so a later enable can reuse it (#126353).

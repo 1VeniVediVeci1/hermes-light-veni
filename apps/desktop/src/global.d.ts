@@ -1020,6 +1020,9 @@ export interface DesktopUpdateStatus {
   }
   /** Which mechanism owns updates for this install (see electron/updater). */
   mechanism?: UpdaterMechanismClient
+  lightProgress?:
+    | { stage: 'fetch'; percent: number; bytesPerSecond: number }
+    | { stage: 'prepare' | 'restart' }
   updateAvailable?: boolean
   branch?: string
   currentBranch?: string
@@ -1058,6 +1061,8 @@ export type DesktopUpdateDirtyStrategy = 'abort' | 'stash' | 'force'
 
 export interface DesktopUpdateApplyOptions {
   dirtyStrategy?: DesktopUpdateDirtyStrategy
+  /** The Light release the user confirmed, if known. */
+  lightTag?: string
 }
 
 export interface DesktopUpdateApplyResult {
@@ -1114,7 +1119,7 @@ export type DesktopUpdateStage =
   | 'error'
 
 export interface DesktopUpdateProgress {
-  /** A background check snapshot, not an apply-progress transition. */
+  /** An updater status snapshot; Light also reports its active phase here. */
   status?: DesktopUpdateStatus
   stage: DesktopUpdateStage
   message: string

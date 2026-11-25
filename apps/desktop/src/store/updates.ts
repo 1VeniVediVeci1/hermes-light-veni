@@ -23,6 +23,7 @@ import { persistString, storedString } from '@/lib/storage'
 import { cloudOwnsUpdates, updateTargetFor } from '@/store/cloud-updates'
 import { $connectionsRegistry, refreshConnectionsRegistry } from '@/store/connections'
 import { reconnectGateway } from '@/store/gateway-reconnect'
+import { lightUpdatePhase, showLightUpdateOffer } from '@/store/light-update'
 import { dismissNotification, notify } from '@/store/notifications'
 import { $connection } from '@/store/session'
 import type { BackendUpdateCheckResponse, UpdateReceiptSummary } from '@/types/hermes'
@@ -317,21 +318,8 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, t
   }
 
   if (target === 'client' && status.mechanism === 'light-portable' && status.latestTag) {
-    notify({
-      action: {
-        label: translateNow('notifications.restartAndUpdate'),
-        onClick: () => startActiveUpdate('client')
-      },
-      durationMs: 0,
-      icon: 'gift',
-      id: UPDATE_TOAST_ID,
-      kind: 'info',
-      message: status.message
-        ? `${translateNow('shell.statusbar.releaseAvailable', status.latestTag)} ${translateNow('notifications.lightUpdateFailed', status.message)}`
-        : translateNow('shell.statusbar.releaseAvailable', status.latestTag),
-      placement: 'bottom-right',
-      title: translateNow('notifications.updateReadyTitle')
-    })
+    const tag = status.latestTag
+    showLightUpdateOffer(status, tag, () => { void applyUpdates({ lightTag: tag }) })
     return
   }
 
@@ -662,12 +650,24 @@ export async function checkBackendUpdates({
 function publishClientUpdateStatus(status: DesktopUpdateStatus): DesktopUpdateStatus {
   const previous = $updateStatus.get()
   if (status.mechanism === 'light-portable' && previous?.mechanism === 'light-portable' && previous.latestTag) {
-    // A check reply can arrive after a newer push. Do not regress the offer
-    // or re-toast an unchanged tag the user may already have dismissed.
     if (!status.latestTag || status.latestTag < previous.latestTag) return previous
-    if (status.latestTag === previous.latestTag) {
+    if (status.latestTag === previous.latestTag && !status.lightProgress && !previous.lightProgress &&
+        status.message === previous.message) {
       $updateStatus.set(status)
       return status
+    }
+  }
+  if (status.mechanism === 'light-portable') {
+    const progress = status.lightProgress
+    if (progress) {
+      $updateApply.set({
+        ...IDLE, applying: true, stage: progress.stage, message: lightUpdatePhase(progress.stage),
+        percent: progress.stage === 'fetch' ? progress.percent : null
+      })
+    } else if (previous?.lightProgress) {
+      $updateApply.set(status.message ? { ...IDLE, stage: 'error', message: status.message, error: 'apply-failed' } : IDLE)
+    } else if (status.latestTag && status.latestTag !== previous?.latestTag) {
+      $updateApply.set(IDLE)
     }
   }
   $updateStatus.set(status)
@@ -684,15 +684,21 @@ export async function checkUpdates({ force = false }: UpdateCheckOptions = {}): 
   }
 
   $updateChecking.set(true)
+  const before = $updateStatus.get()
 
   try {
-    const status = publishClientUpdateStatus(await bridge.check({ force }))
+    const reply = await bridge.check({ force })
+    const current = $updateStatus.get()
+    // An IPC snapshot can arrive after a push for the same release/operation.
+    if (reply.mechanism === 'light-portable' && current !== before && current?.mechanism === 'light-portable' &&
+        (reply.latestTag ?? '') <= (current.latestTag ?? '')) return current
+    const status = publishClientUpdateStatus(reply)
     void refreshDesktopVersion()
 
     return status
   } catch (error) {
     const previous = $updateStatus.get()
-
+    if (previous?.mechanism === 'light-portable' && previous.latestTag) return previous
     const fallback: DesktopUpdateStatus = {
       supported: previous?.supported ?? true,
       branch: previous?.branch,
@@ -792,11 +798,21 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
     return { ok: false, error: 'unavailable', message: 'Desktop bridge unavailable.' }
   }
 
-  dismissNotification(UPDATE_TOAST_ID)
-  $updateApply.set({ ...IDLE, applying: true, stage: 'prepare', message: 'Starting update…' })
+  const status = $updateStatus.get()
+  const lightTag = status?.mechanism === 'light-portable' ? status.latestTag : undefined
+  if (lightTag && $updateApply.get().applying) return { ok: false, error: 'update-in-flight' }
+  if (lightTag && opts.lightTag && opts.lightTag !== lightTag) return { ok: false, error: 'offer-changed' }
+  if (!lightTag) dismissNotification(UPDATE_TOAST_ID)
+  $updateApply.set({ ...IDLE, applying: true, stage: 'prepare', message: lightTag ? lightUpdatePhase('prepare') : 'Starting update…' })
 
   try {
-    const result = await bridge.apply(opts)
+    const result = await bridge.apply(lightTag ? { ...opts, lightTag } : opts)
+    if (lightTag && (result?.error === 'offer-changed' || result?.error === 'update-in-flight')) {
+      if (!$updateStatus.get()?.lightProgress) $updateApply.set(IDLE)
+      void checkUpdates()
+      return result
+    }
+    if (lightTag && !result?.ok) showLightApplyFailure(lightTag, result?.message ?? translateNow('updates.errorBody'))
 
     // CLI install with no staged updater: not an error — the user just runs
     // `hermes update` themselves. Land on a dedicated manual state so the
@@ -887,9 +903,17 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
     return result
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
+    if (lightTag) showLightApplyFailure(lightTag, message)
     $updateApply.set({ ...$updateApply.get(), applying: false, stage: 'error', error: 'apply-failed', message })
 
     return { ok: false, error: 'apply-failed', message }
+  }
+}
+
+function showLightApplyFailure(tag: string, message: string): void {
+  const current = $updateStatus.get()
+  if (current?.mechanism === 'light-portable' && current.latestTag === tag && (current.lightProgress || current.message !== message)) {
+    publishClientUpdateStatus({ ...current, lightProgress: undefined, message })
   }
 }
 

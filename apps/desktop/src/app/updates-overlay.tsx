@@ -436,7 +436,12 @@ function IdleView({
 
   const lightTag = status.mechanism === 'light-portable' ? status.latestTag : null
   const { title, body } = lightTag
-    ? { title: t.notifications.updateReadyTitle, body: t.shell.statusbar.releaseAvailable(lightTag) }
+    ? {
+        title: t.notifications.lightUpdateAvailable,
+        body: status.message
+          ? `${t.shell.statusbar.releaseAvailable(lightTag)} ${t.notifications.lightUpdateFailed(status.message)}`
+          : t.shell.statusbar.releaseAvailable(lightTag)
+      }
     : rollbackTag
       ? { title: channelCopy.rollbackTitle(rollbackTag), body: channelCopy.rollbackBody(rollbackTag) }
       : resolveUpdateCopy({
@@ -470,7 +475,9 @@ function IdleView({
 
       <div className="grid gap-2">
         <Button className="font-semibold" onClick={onInstall} size="lg">
-          {lightTag ? t.notifications.restartAndUpdate : rollbackTag ? channelCopy.rollbackAction(rollbackTag) : u.updateNow}
+          {lightTag
+            ? status.message ? t.common.retry : t.notifications.lightDownloadAndUpdate
+            : rollbackTag ? channelCopy.rollbackAction(rollbackTag) : u.updateNow}
         </Button>
         <Button className="font-medium" onClick={onLater} type="button" variant="text">
           {u.maybeLater}
@@ -617,16 +624,17 @@ function ApplyingView({
   const { t } = useI18n()
   const u = t.updates
   const label = u.stages[apply.stage as DesktopUpdateStage] ?? u.stages.idle
+  const isLight = statusMechanism === 'light-portable'
   const isWindowsPackage = statusMechanism === 'app-installer' || statusMechanism === 'microsoft-store'
 
-  const body = isWindowsPackage ? u.applyingBodyAppInstaller : isBackend ? u.applyingBodyBackend : u.applyingBody
+  const body = isLight ? u.applyingClose : isWindowsPackage ? u.applyingBodyAppInstaller : isBackend ? u.applyingBodyBackend : u.applyingBody
 
-  const currentMessage = apply.message.trim()
+  const currentMessage = isLight ? '' : apply.message.trim()
   const recentLog = apply.log.slice(-4)
 
   const percent =
     typeof apply.percent === 'number' && Number.isFinite(apply.percent)
-      ? Math.max(2, Math.min(100, Math.round(apply.percent)))
+      ? Math.max(isLight ? 0 : 2, Math.min(100, Math.round(apply.percent)))
       : null
 
   return (
@@ -659,7 +667,7 @@ function ApplyingView({
         </div>
       ) : null}
 
-      <p className="text-center text-xs text-muted-foreground">{u.applyingClose}</p>
+      {!isLight && <p className="text-center text-xs text-muted-foreground">{u.applyingClose}</p>}
     </div>
   )
 }

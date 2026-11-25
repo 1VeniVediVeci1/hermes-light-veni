@@ -16659,7 +16659,7 @@ ipcMain.handle(
 )
 
 ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
-  (lightSelfUpdater ? lightSelfUpdater.apply() : applyUpdates()).catch(error => ({
+  (lightSelfUpdater ? lightSelfUpdater.apply(payload?.lightTag) : applyUpdates()).catch(error => ({
     ok: false,
     error: 'apply-failed',
     message: error?.message || String(error)

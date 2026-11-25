@@ -206,6 +206,7 @@ const NOTICE_IDS: Record<string, DesktopNoticeId> = {
   'composer-queue-stuck': 'composer_queue_stuck',
   'desktop-build-discontinued': 'build_discontinued',
   'desktop-update-available': 'update_available',
+  'light-portable-update': 'update_available',
   'gui-contract-skew': 'gui_skew',
   'install-method-not-supported': 'install_method',
   'runtime-not-ready': 'runtime_not_ready',

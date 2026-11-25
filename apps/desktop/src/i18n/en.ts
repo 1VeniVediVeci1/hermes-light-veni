@@ -416,7 +416,8 @@ export const en: Translations = {
     installMethodUnsupportedTitle: 'Unsupported install method',
     updateHermes: 'Update Hermes',
     updateReadyTitle: 'Update ready',
-    restartAndUpdate: 'Restart and update',
+    lightUpdateAvailable: 'Update available',
+    lightDownloadAndUpdate: 'Download and update',
     lightUpdateFailed: reason => `The last update attempt failed: ${reason}`,
     updateReadyMessage: count => `${count} new change${count === 1 ? '' : 's'} available.`,
     updateReadyMessageUnknown: 'A new update is available.',
@@ -1182,9 +1183,9 @@ export const en: Translations = {
     },
     about: { updates: 'Updates', channel: enUpdateChannel },
     config: {
-      minimizeToTrayTitle: 'Minimize to tray',
+      minimizeToTrayTitle: 'Close to tray',
       minimizeToTrayDesc:
-        'Minimize windows or close the main window to hide them in the system tray (menu bar on macOS) and keep Hermes running. Use Quit Hermes from the tray menu or Cmd+Q to exit. Off by default; applies only to this device.',
+        'Close the main window to hide it in the system tray (menu bar on macOS) and keep Hermes running; the minimize button works as usual. Use Quit Hermes from the tray menu or Cmd+Q to exit. Off by default; applies only to this device.',
       minimizeToTrayUnavailable:
         'The system tray is unavailable. Windows will minimize and close normally. Turn this off and on to retry.',
       none: 'None',

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setApiRequestConnection, setApiRequestProfile } from '@/api/client'
-import type { DesktopUpdateStatus, DesktopVersionInfo } from '@/global'
+import type { DesktopUpdateApplyResult, DesktopUpdateStatus, DesktopVersionInfo } from '@/global'
 import { en } from '@/i18n/en'
 
 const storage = new Map<string, string>()
@@ -1640,8 +1640,11 @@ describe('startUpdatePoller', () => {
     expect($updateStatus.get()?.behind).toBe(5)
   })
 
-  it('shows the newest Light offer in one bottom-right toast and applies it to the client', async () => {
-    const apply = vi.fn().mockResolvedValue({ ok: true, handedOff: true })
+  it('keeps the Light offer in one bottom-right card through download, failure and dismissal', async () => {
+    let finishApply!: (result: DesktopUpdateApplyResult) => void
+    const apply = vi.fn(() => new Promise<DesktopUpdateApplyResult>(resolve => { finishApply = resolve }))
+    $updateOverlayOpen.set(false)
+    resetUpdateApplyState()
     window.hermesDesktop!.updates!.apply = apply
     const ready = (latestTag: string) => ({
       supported: true, mechanism: 'light-portable', updateAvailable: true, latestTag
@@ -1664,12 +1667,42 @@ describe('startUpdatePoller', () => {
     expect(notifySpy.mock.calls[0][0].id).toBe(notifySpy.mock.calls[1][0].id)
     expect(notifySpy).toHaveBeenLastCalledWith(expect.objectContaining({
       placement: 'bottom-right', message: expect.stringContaining(newer.latestTag),
-      action: expect.objectContaining({ label: en.notifications.restartAndUpdate })
+      action: expect.objectContaining({ label: en.notifications.lightDownloadAndUpdate, keepOpen: true })
     }))
     try {
+      const confirm = lastToast().action.onClick
+      confirm()
+      confirm()
+      expect(apply).toHaveBeenCalledExactlyOnceWith({ lightTag: newer.latestTag })
+      expect($updateOverlayOpen.get()).toBe(false)
+      const progress = { ...newer, lightProgress: { stage: 'fetch', percent: 42, bytesPerSecond: 8_300_000 } }
+      // A snapshot for the same tag captured before the push must not hide progress.
+      checkMock.mockResolvedValueOnce(newer)
+      const staleCheck = checkUpdates()
+      push({ status: progress })
+      expect(await staleCheck).toEqual(progress)
+      expect($updateApply.get()).toMatchObject({ applying: true, stage: 'fetch', percent: 42 })
+      expect(notifySpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        action: undefined, progress: 42, meta: '42% · 8.3 MB/s', durationMs: 0, persistent: true
+      }))
+
+      const message = 'Portable asset download: HTTP 503'
+      push({ status: { ...newer, message } })
+      finishApply({ ok: false, error: 'apply-failed', message })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(notifySpy).toHaveBeenLastCalledWith(expect.objectContaining({
+        kind: 'error', message: expect.stringContaining(message), action: expect.objectContaining({ label: en.common.retry })
+      }))
       lastToast().action.onClick()
-      expect(apply).toHaveBeenCalledTimes(1)
-      expect($updateOverlayTarget.get()).toBe('client')
+      expect(apply).toHaveBeenCalledTimes(2)
+      push({ status: progress })
+      lastToast().onDismiss()
+      notifySpy.mockClear()
+      push({ status: { ...newer, lightProgress: { stage: 'prepare' } } })
+      push({ status: { ...newer, lightProgress: { stage: 'restart' } } })
+      expect(notifySpy).not.toHaveBeenCalled()
+      expect($updateApply.get().stage).toBe('restart')
+      finishApply({ ok: true, handedOff: true })
       await vi.advanceTimersByTimeAsync(0)
     } finally {
       $updateOverlayOpen.set(false)

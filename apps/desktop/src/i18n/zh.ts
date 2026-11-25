@@ -220,7 +220,8 @@ export const zhOverrides = {
     installMethodUnsupportedTitle: '不受支持的安装方式',
     updateHermes: '更新 Hermes',
     updateReadyTitle: '有可用更新',
-    restartAndUpdate: '重启并更新',
+    lightUpdateAvailable: '有可用更新',
+    lightDownloadAndUpdate: '下载并更新',
     lightUpdateFailed: reason => `上次更新失败：${reason}`,
     updateReadyMessage: count => `有 ${count} 项新更改可用。`,
     updateReadyMessageUnknown: '有新更新可用。',
@@ -1234,9 +1235,9 @@ export const zhOverrides = {
     },
     about: { updates: '更新', channel: zhUpdateChannel },
     config: {
-      minimizeToTrayTitle: '最小化到托盘',
+      minimizeToTrayTitle: '关闭到托盘',
       minimizeToTrayDesc:
-        '最小化窗口或关闭主窗口时，将其隐藏到系统托盘（macOS 上为菜单栏），让 Hermes 继续运行。通过托盘菜单中的“退出 Hermes”或 Cmd+Q 退出。默认关闭，仅适用于此设备。',
+        '关闭主窗口时，将其隐藏到系统托盘（macOS 上为菜单栏），让 Hermes 继续运行；最小化按钮保持系统默认行为。通过托盘菜单中的“退出 Hermes”或 Cmd+Q 退出。默认关闭，仅适用于此设备。',
       minimizeToTrayUnavailable: '系统托盘不可用。窗口将正常最小化和关闭。关闭此选项后重新开启即可重试。',
       none: '无',
       noneParen: '(无)',

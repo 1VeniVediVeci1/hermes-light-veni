@@ -78,7 +78,53 @@ async function assertArchive(zip: string, release: LightRelease): Promise<void> 
   }
 }
 
-async function stageRelease(root: string, release: LightRelease, system32: string, log: (message: string) => void) {
+type LightProgress = NonNullable<UpdaterStatusWire['lightProgress']>
+const PROGRESS_INTERVAL_MS = 350
+const SPEED_WINDOW_MS = 1_750
+
+async function downloadArchive(
+  zip: string, release: LightRelease, report: (progress: LightProgress) => void
+): Promise<void> {
+  const signal = AbortSignal.timeout(30 * 60_000)
+  let bytes = 0
+  let previous: Extract<LightProgress, { stage: 'fetch' }> = { stage: 'fetch', percent: 0, bytesPerSecond: 0 }
+  report(previous)
+  const samples = [{ at: performance.now(), bytes }]
+  const timer = setInterval(() => {
+    const at = performance.now()
+    samples.push({ at, bytes })
+    while (samples.length > 2 && samples[0].at < at - SPEED_WINDOW_MS) samples.shift()
+    const first = samples[0]
+    const percent = Math.floor(bytes / release.size * 100)
+    const bytesPerSecond = Math.round((bytes - first.bytes) * 1000 / (at - first.at))
+    if (previous.percent === percent && previous.bytesPerSecond === bytesPerSecond) return
+    previous = { stage: 'fetch', percent, bytesPerSecond }
+    report(previous)
+  }, PROGRESS_INTERVAL_MS)
+  try {
+    const response = await net.fetch(release.url, { headers: HEADERS, credentials: 'omit', cache: 'no-store', signal })
+    if (!response.ok || !response.body) throw new Error(`Portable asset download: HTTP ${response.status}`)
+    await pipeline(
+      response.body,
+      async function* (source) {
+        for await (const chunk of source) {
+          bytes += chunk.byteLength
+          if (bytes > release.size) throw new Error('Portable asset exceeds announced size')
+          yield chunk
+        }
+      },
+      createWriteStream(zip, { flags: 'wx' }),
+      { signal }
+    )
+  } finally {
+    clearInterval(timer)
+  }
+}
+
+async function stageRelease(
+  root: string, release: LightRelease, system32: string, log: (message: string) => void,
+  report: (progress: LightProgress) => void
+) {
   const stage = path.join(root, release.tag)
   const partial = `${stage}.partial`
   try {
@@ -96,22 +142,8 @@ async function stageRelease(root: string, release: LightRelease, system32: strin
   await mkdir(payload, { recursive: true })
   try {
     const zip = path.join(partial, ASSET)
-    const signal = AbortSignal.timeout(30 * 60_000)
-    const response = await net.fetch(release.url, { headers: HEADERS, credentials: 'omit', cache: 'no-store', signal })
-    if (!response.ok || !response.body) throw new Error(`Portable asset download: HTTP ${response.status}`)
-    let bytes = 0
-    await pipeline(
-      response.body,
-      async function* (source) {
-        for await (const chunk of source) {
-          bytes += chunk.byteLength
-          if (bytes > release.size) throw new Error('Portable asset exceeds announced size')
-          yield chunk
-        }
-      },
-      createWriteStream(zip, { flags: 'wx' }),
-      { signal }
-    )
+    await downloadArchive(zip, release, report)
+    report({ stage: 'prepare' })
     await assertArchive(zip, release)
     await runFile(path.join(system32, 'tar.exe'), ['-xf', zip, '-C', payload], { windowsHide: true, timeout: 600_000 })
     const entries = await readdir(payload)
@@ -254,8 +286,6 @@ interface StagedUpdate {
   stage: string
   installDir: string
   system32: string
-  /** Why the last swap of this stage failed, from its swap.log. */
-  lastFailure?: string
 }
 
 /** The failure reason of the most recent swap attempt recorded in a stage's swap.log. */
@@ -276,7 +306,7 @@ export function createLightSelfUpdater({ light, primary, isQuitting, quitForHand
   if (process.platform !== 'win32' || !app.isPackaged || !light || !primary) return null
   if (process.env.HERMES_LIGHT_DISABLE_UPDATES === '1') return null
 
-  let pending: StagedUpdate | null = null
+  let pending: LightRelease | null = null
   let checking: Promise<void> | null = null
   let applying = false
   let status: UpdaterStatusWire = { supported: true, mechanism: 'light-portable', updateAvailable: false }
@@ -291,7 +321,6 @@ export function createLightSelfUpdater({ light, primary, isQuitting, quitForHand
       return
     }
     if (isQuitting()) return
-    // Keep checking the release feed with a pending offer, but never stage its tag again.
     const release = await findNewRelease(pending?.tag ?? ownTag)
     if (applying || isQuitting()) return
     if (!release) {
@@ -299,21 +328,12 @@ export function createLightSelfUpdater({ light, primary, isQuitting, quitForHand
       return
     }
 
-    const candidate = await prepareUpdate(release, log)
+    // Check metadata only. The previous swap's local diagnostic is cheap to
+    // read, but ZIP validation, extraction and cleanup wait for confirmation.
+    const message = await readPreviousSwapFailure(release.tag)
     if (applying || isQuitting()) return
-    pending = candidate
-    status = {
-      ...status,
-      supported: true,
-      updateAvailable: true,
-      latestTag: candidate.tag,
-      message: candidate.lastFailure,
-      fetchedAt: Date.now()
-    }
-    onStatus(status)
-    // Only clean up after the new stage is ready and owns the offer, so a failed
-    // download never invalidates the previous offer or races an apply of it.
-    await pruneOlderStages(path.dirname(candidate.stage), candidate.tag, log)
+    pending = release
+    publish({ supported: true, updateAvailable: true, latestTag: release.tag, message, fetchedAt: Date.now() })
   }
 
   async function check({ force = false } = {}): Promise<UpdaterStatusWire> {
@@ -339,17 +359,31 @@ export function createLightSelfUpdater({ light, primary, isQuitting, quitForHand
     }, 4_000).unref()
   }
 
-  async function apply(): Promise<UpdaterApplyResultWire> {
+  function publish(changes: Partial<UpdaterStatusWire>): void {
+    status = { ...status, ...changes }
+    onStatus(status)
+  }
+
+  async function apply(expectedTag?: string): Promise<UpdaterApplyResultWire> {
     if (applying || isQuitting()) return { ok: false, error: 'update-in-flight' }
     if (!pending) return { ok: true, updateAvailable: false }
+    if (expectedTag !== undefined && expectedTag !== pending.tag) return { ok: false, error: 'offer-changed' }
     applying = true
+    const report = (lightProgress: LightProgress) => publish({ lightProgress, message: undefined })
     try {
-      if (!await launchSwap(pending, isQuitting)) return { ok: false, error: 'app-quitting' }
+      report({ stage: 'prepare' })
+      const candidate = await prepareUpdate(pending, log, report)
+      await pruneOlderStages(path.dirname(candidate.stage), candidate.tag, log)
+        .catch(error => log(`[light-update] ${error}`))
+      report({ stage: 'restart' })
+      if (!await launchSwap(candidate, isQuitting)) return { ok: false, error: 'app-quitting' }
       quitForHandoff()
       return { ok: true, handedOff: true }
     } catch (error) {
-      log(`[light-update] updater launch failed: ${error}`)
-      return { ok: false, error: 'apply-failed' }
+      const message = error instanceof Error ? error.message : String(error)
+      log(`[light-update] update failed: ${error}`)
+      publish({ lightProgress: undefined, message })
+      return { ok: false, error: 'apply-failed', message }
     } finally {
       applying = false
     }
@@ -369,9 +403,25 @@ async function findNewRelease(ownTag: string): Promise<LightRelease | null> {
   return selectLightRelease(await response.json(), ownTag)
 }
 
-async function prepareUpdate(release: LightRelease, log: LightUpdateOptions['log']): Promise<StagedUpdate> {
+async function updateCacheRoot(): Promise<string> {
+  return path.join(await realpath(app.getPath('temp')), 'HermesLightUpdate')
+}
+
+async function readPreviousSwapFailure(tag: string): Promise<string | undefined> {
+  const root = await updateCacheRoot().catch(() => null)
+  if (!root) return undefined
+  const stage = path.join(root, tag)
+  if (!(await lstat(root).catch(() => null))?.isDirectory() ||
+      !(await lstat(stage).catch(() => null))?.isDirectory()) return undefined
+  const swapLog = await readFile(path.join(stage, 'swap.log'), 'utf8').catch(() => '')
+  return lastSwapFailure(swapLog)
+}
+
+async function prepareUpdate(
+  release: LightRelease, log: LightUpdateOptions['log'], report: (progress: LightProgress) => void
+): Promise<StagedUpdate> {
   const installDir = await realpath(path.dirname(process.execPath))
-  const root = path.join(await realpath(app.getPath('temp')), 'HermesLightUpdate')
+  const root = await updateCacheRoot()
   const userData = await realpath(app.getPath('userData'))
   if (installDir === path.parse(installDir).root || isWithin(installDir, root) ||
       isWithin(root, installDir) || isWithin(installDir, userData)) {
@@ -380,9 +430,8 @@ async function prepareUpdate(release: LightRelease, log: LightUpdateOptions['log
   const system32 = path.join(process.env.SystemRoot, 'System32')
   await mkdir(root, { recursive: true })
   if (!(await lstat(root)).isDirectory()) throw new Error('Invalid update cache directory')
-  const stage = await stageRelease(root, release, system32, log)
-  const swapLog = await readFile(path.join(stage, 'swap.log'), 'utf8').catch(() => '')
-  return { tag: release.tag, stage, installDir, system32, lastFailure: lastSwapFailure(swapLog) }
+  const stage = await stageRelease(root, release, system32, log, report)
+  return { tag: release.tag, stage, installDir, system32 }
 }
 
 async function pruneOlderStages(root: string, tag: string, log: LightUpdateOptions['log']): Promise<void> {

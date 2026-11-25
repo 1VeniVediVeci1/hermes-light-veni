@@ -428,7 +428,9 @@ export const frOverrides = {
     installMethodUnsupportedTitle: "Méthode d'installation non prise en charge",
     updateHermes: 'Mettre à jour Hermes',
     updateReadyTitle: 'Mise à jour prête',
-    restartAndUpdate: 'Redémarrer et mettre à jour',
+    lightUpdateAvailable: 'Mise à jour disponible',
+    lightDownloadAndUpdate: 'Télécharger et mettre à jour',
+    lightUpdateFailed: reason => `La dernière tentative de mise à jour a échoué : ${reason}`,
     updateReadyMessage: count =>
       `${count} ${count === 1 ? 'nouvelle modification disponible' : 'nouvelles modifications disponibles'}.`,
     updateReadyMessageUnknown: 'Une nouvelle mise à jour est disponible.',

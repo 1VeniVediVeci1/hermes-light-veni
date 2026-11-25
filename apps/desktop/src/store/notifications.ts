@@ -12,6 +12,8 @@ export type NotificationKind = 'error' | 'warning' | 'info' | 'success'
 export interface NotificationAction {
   label: string
   onClick: () => void
+  /** The action updates the same card in place rather than dismissing it. */
+  keepOpen?: boolean
 }
 
 export type NotificationPlacement = 'default' | 'bottom-right'
@@ -25,6 +27,8 @@ export interface AppNotification {
   accentColor?: string
   /** Secondary detail line rendered below the message, muted (e.g. "$220.00 cap"). */
   meta?: string
+  /** Percent complete, or null for an indeterminate progress bar. */
+  progress?: number | null
   title?: string
   message: string
   detail?: string
@@ -44,6 +48,8 @@ export interface NotificationInput {
   icon?: string
   accentColor?: string
   meta?: string
+  /** Percent complete, or null for an indeterminate progress bar. */
+  progress?: number | null
   title?: string
   message: string
   detail?: string
@@ -348,6 +354,7 @@ function showNotification(input: NotificationInput, errorCategory: ErrorToastCat
     icon: input.icon,
     accentColor: input.accentColor,
     meta: input.meta,
+    progress: input.progress,
     title: input.title,
     message: input.message,
     detail: input.detail,

@@ -50,10 +50,12 @@ export function createMinimizeToTray(options: Options) {
       return
     }
 
-    // A hidden primary must not remove a visible peer from Cmd-Tab/the Dock.
-    const foreground = [...windows].some(win => !win.isDestroyed() && win.isVisible() && !win.isMinimized())
+    // A hidden primary must not remove a visible or minimized peer from the Dock.
+    const hasWindowInDock = [...windows].some(
+      win => !win.isDestroyed() && !hidden.has(win) && (win.isVisible() || win.isMinimized())
+    )
 
-    if (status().available && hidden.size > 0 && !foreground && !quitting) {
+    if (status().available && hidden.size > 0 && !hasWindowInDock && !quitting) {
       dockHidden = true
       app.dock?.hide()
     } else {
@@ -240,24 +242,7 @@ export function createMinimizeToTray(options: Options) {
       return true
     }
 
-    // Hide past the native minimize dispatch, not inside it: hiding
-    // synchronously here re-enters window-state changes mid-flight and on
-    // Windows wedges isMinimized(), so the later restore takes the
-    // restore-on-hidden path back to a painted-but-dead window (#119252).
-    // Guards are re-evaluated at fire time inside hide(); the close handler
-    // below keeps its synchronous hide so preventDefault still works.
-    win.on('minimize', () => {
-      setImmediate(() => {
-        // The user may have restored the window in the meantime (taskbar or
-        // shortcut); a stale hide must not snatch it back.
-        if (!win.isDestroyed() && !win.isMinimized() && win.isVisible()) {
-          return
-        }
-
-        hide()
-      })
-    })
-
+    // Leave minimize to the OS; only windows that opt in may close to the tray.
     if (closeToTray) {
       win.on('close', event => {
         if (hide()) {
@@ -275,7 +260,7 @@ export function createMinimizeToTray(options: Options) {
     // window without the tray. restore() alone paints the window on Windows but
     // does not make it the foreground window, so it drops all input (#127349).
     // Finish the activation like restoreHidden() does. Defer it, because the
-    // native restore must finish first (same reason as the deferred hide).
+    // native restore must finish first.
     const release = () => {
       if (released(win) && process.platform === 'win32') {
         setImmediate(() => {
