@@ -48,10 +48,11 @@ async def shell_exec(connection, ref, params):
     backend = str(json.loads(policy.terminal_json).get('TERMINAL_ENV') or '').strip().lower()
     if backend not in _LOCAL_BACKENDS:
         raise AuthorityRefusal('unsupported_terminal_backend', field='terminal.backend', detail=backend)
-    from tools.approval_detection import detect_dangerous_command, detect_hardline_command
+    from tools.approval_detection import detect_dangerous_command
+    from tools.approval_floors import hardline_verdict
     # No prompt here, so anything the agent's gate would ask about is refused, including a command
     # the scanners could not read to the end (detect_dangerous_command reports that too).
-    if detect_hardline_command(command)[0] or detect_dangerous_command(command)[0]:
+    if hardline_verdict(command)[0] or detect_dangerous_command(command)[0]:
         raise AuthorityRefusal('dangerous_command')
     return await asyncio.to_thread(_run, command, policy.cwd)
 
