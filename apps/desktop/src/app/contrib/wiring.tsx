@@ -929,7 +929,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     updateSessionState
   })
 
-  // sessions.changed refreshes every open transcript; only messaging retains
+  // sessions.changed refreshes open transcripts and changed warm-cache entries; only messaging retains
   // the periodic safety-net it already had before this fix.
   // Keep app data live while the gateway is open (on-connect reseed + the
   // cron / messaging / transcript visibility polls + fresh-draft reseed).
@@ -948,7 +948,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     refreshMessagingSessions,
     refreshSessions,
     requestGateway,
-    updateSessionState
+    updateSessionState,
+    warmTranscriptCache: { runtimeIdByStoredSessionIdRef, sessionStateByRuntimeIdRef }
   })
 
   // Electron-main / OS / cross-window integrations: update polling, ⌘W close,

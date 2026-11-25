@@ -1,27 +1,13 @@
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import {
-  extendRefreshPageToOverlap,
-  graftRefreshedTailOntoBackfill,
-  olderPageReader
-} from '@/app/chat/transcript-backfill'
-import {
-  isSessionRecentlyInterrupted,
-  recentInterruptRemainingMs
-} from '@/app/session/hooks/use-prompt-actions/utils'
+import { extendRefreshPageToOverlap, olderPageReader } from '@/app/chat/transcript-backfill'
+import { recentInterruptRemainingMs } from '@/app/session/hooks/use-prompt-actions/utils'
 import { sessionCreatedThisRun } from '@/app/session/hooks/use-session-actions/created-this-run'
-import { preserveLocalPendingTurnMessages } from '@/app/session/hooks/use-session-actions/utils'
 import { getLatestSessionMessages, type ProfileScope } from '@/hermes'
-import {
-  type ChatMessage,
-  preserveLocalAssistantErrors,
-  preserveLocalSystemNotices,
-  sealOpenToolParts,
-  toChatMessages
-} from '@/lib/chat-messages'
+import { type ChatMessage, sealOpenToolParts, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { sessionListFingerprint, sessionMessagesSignature } from '@/lib/session-signatures'
+import { sessionListFingerprint } from '@/lib/session-signatures'
 import { latestSessionTodos, latestSessionTodoSnapshot } from '@/lib/todos'
 import { pendingSessionReplay } from '@/store/gateway'
 import { sharedPrimaryRoute } from '@/store/gateway-shared-route'
@@ -69,7 +55,17 @@ import {
 import type { ClientSessionState } from '../../types'
 import type { GatewayRequester } from '../types'
 
+import {
+  emptyPageOverPopulatedTranscript,
+  mergeRefreshedTranscript,
+  refreshedTranscriptSignature,
+  runtimeOwnsLiveTranscript,
+  stopAwaitsItsReceipt
+} from './transcript-reconcile'
 import { useLiveWorkRoster } from './use-live-work-roster'
+import { useWarmTranscriptRefresh, type WarmTranscriptCache } from './use-warm-transcript-refresh'
+
+export { stopAwaitsItsReceipt } from './transcript-reconcile'
 
 interface ActiveTranscriptSession {
   ownerRoute?: SessionOwnerRoute
@@ -143,36 +139,8 @@ export interface ActiveTranscriptRefreshDeps {
   ) => ClientSessionState
 }
 
-/**
- * Stop idles the view at the click, but the stopped turn's rows stay unstored
- * until its interrupted `message.complete` binds the receipt. A page read in
- * that gap already holds the stored turn, so the merge drew it twice until the
- * completion landed (#144899 N2). The hold ends with the binding, or with the
- * Stop cooldown when no receipt ever comes.
- */
-export function stopAwaitsItsReceipt(state: ClientSessionState, runtimeId: string): boolean {
-  if (!state.interrupted || !isSessionRecentlyInterrupted(runtimeId)) {
-    return false
-  }
-
-  const messages = state.messages
-  const lastUser = messages.findLastIndex(message => message.role === 'user')
-  const lastReply = messages.findLastIndex(message => message.role === 'assistant' && !message.hidden)
-
-  if (lastReply > lastUser) {
-    return !messages[lastReply].persistedTurn
-  }
-
-  return lastUser >= 0 && messages[lastUser].rowId === undefined
-}
-
 function tileRuntimeOwnsLiveState(runtimeId: string): boolean {
-  const state = $sessionStates.get()[runtimeId]
-
-  return Boolean(
-    state &&
-      (state.busy || state.awaitingResponse || state.needsInput || state.turnLive || stopAwaitsItsReceipt(state, runtimeId))
-  )
+  return runtimeOwnsLiveTranscript($sessionStates.get()[runtimeId], runtimeId)
 }
 
 /** Backfill/retention may prepend or release a prefix without changing the tail. */
@@ -198,18 +166,7 @@ function transcriptChangedDuringRead(before: ChatMessage[] | undefined, after: C
   return false
 }
 
-/** Zero persisted rows read over a populated runtime bound to the SAME stored
- *  session. An empty page is not proof the transcript is empty — it is also
- *  what a respawning backend (or a state.db read racing the change event)
- *  returns. A runtime rebound to another stored id while the read was in
- *  flight holds no evidence about the requested transcript. */
-function emptyPageOverPopulatedTranscript(
-  page: readonly unknown[],
-  current: ClientSessionState | undefined,
-  storedSessionId: string
-): boolean {
-  return page.length === 0 && Boolean(current?.messages.length) && current?.storedSessionId === storedSessionId
-}
+
 
 type TileTranscriptTarget = { ownerRoute?: SessionOwnerRoute; storedSessionId: string; runtimeId?: string }
 
@@ -382,11 +339,10 @@ export async function reconcileTileTranscripts({
 
       // Same rule as the active pane below: a transient zero-row page must not
       // blank a populated tile, and leaves no signature behind.
-      if (emptyPageOverPopulatedTranscript(latest.messages, current, storedSessionId)) {
+      const signature = refreshedTranscriptSignature(latest.messages, current, storedSessionId)
+      if (signature === undefined) {
         continue
       }
-
-      const signature = sessionMessagesSignature(latest.messages)
 
       if (signatureRef.current.get(signatureKey) === signature) {
         // Transcript already in sync — arm the pre-fetch gate so the next
@@ -423,22 +379,7 @@ export async function reconcileTileTranscripts({
         runtimeSessionId,
         state => ({
           ...state,
-          // An un-acked optimistic `user-*` row exists only here, so a
-          // background refresh that lands mid-send would drop it and the
-          // message would have to be retyped. Same composition order as
-          // reconcileAuthoritativeChatMessages (use-session-actions/index.ts).
-          // Trailing client-local system notices (fallback switch, #126422)
-          // are re-grafted last: the stored page cannot carry them.
-          messages: preserveLocalSystemNotices(
-            preserveLocalAssistantErrors(
-              preserveLocalPendingTurnMessages(
-                graftRefreshedTailOntoBackfill(messages, state.messages),
-                state.messages
-              ),
-              state.messages
-            ),
-            state.messages
-          )
+          messages: mergeRefreshedTranscript(messages, state.messages)
         }),
         storedSessionId
       )
@@ -517,18 +458,7 @@ export async function hydrateStoredSessionTranscript({
         runtimeSessionId,
         state => ({
           ...state,
-          // Keep backfilled pages, un-acked optimistic input, local errors, and
-          // trailing client-local system notices (#126422).
-          messages: preserveLocalSystemNotices(
-            preserveLocalAssistantErrors(
-              preserveLocalPendingTurnMessages(
-                graftRefreshedTailOntoBackfill(messages, state.messages),
-                state.messages
-              ),
-              state.messages
-            ),
-            state.messages
-          )
+          messages: mergeRefreshedTranscript(messages, state.messages)
         }),
         storedSessionId
       )
@@ -663,11 +593,10 @@ export async function reconcileActiveTranscript({
     // publishing the page would blank the thread and trip the routed loading
     // branch. Bail before the signature write so the next usable page is not
     // deduped away.
-    if (emptyPageOverPopulatedTranscript(latest.messages, current, storedSessionId)) {
+    const signature = refreshedTranscriptSignature(latest.messages, current, storedSessionId)
+    if (signature === undefined) {
       return
     }
-
-    const signature = sessionMessagesSignature(latest.messages)
 
     if (signatureRef.current.get(signatureKey) === signature) {
       return
@@ -689,17 +618,7 @@ export async function reconcileActiveTranscript({
       runtimeSessionId,
       state => ({
         ...state,
-        // The refresh re-reads only the newest tail page; graft it onto any
-        // older pages "Show earlier" already backfilled instead of clobbering
-        // them (see transcript-backfill). Trailing client-local system notices
-        // (fallback switch, #126422) are re-grafted last.
-        messages: preserveLocalSystemNotices(
-          preserveLocalAssistantErrors(
-            preserveLocalPendingTurnMessages(graftRefreshedTailOntoBackfill(messages, state.messages), state.messages),
-            state.messages
-          ),
-          state.messages
-        )
+        messages: mergeRefreshedTranscript(messages, state.messages)
       }),
       storedSessionId
     )
@@ -1000,6 +919,7 @@ interface BackgroundSyncParams {
   refreshMessagingSessions: () => Promise<unknown> | unknown
   refreshSessions: () => Promise<unknown> | unknown
   requestGateway: GatewayRequester
+  warmTranscriptCache?: WarmTranscriptCache
   updateSessionState: (
     sessionId: string,
     updater: (state: ClientSessionState) => ClientSessionState,
@@ -1073,11 +993,21 @@ export function useBackgroundSync({
   refreshMessagingSessions,
   refreshSessions,
   requestGateway,
-  updateSessionState
+  updateSessionState,
+  warmTranscriptCache
 }: BackgroundSyncParams): void {
   useLiveWorkRoster()
   const changeEventsAvailable = useStore($changeEventsAvailable)
   const cronChangeTick = useStore($cronChangeTick)
+  const warmTranscripts = useWarmTranscriptRefresh({
+    cache: warmTranscriptCache,
+    enabled: changeEventsAvailable && gatewayState === 'open',
+    activeSessionId,
+    selectedStoredId: activeStoredSessionId,
+    connectionId: activeConnectionId,
+    profile: activeGatewayProfile,
+    updateSessionState
+  })
   const activeTranscriptRefreshPendingRef = useRef<string | null>(null)
   const activeTranscriptReadRef = useRef<{ sessionKey: string; preservePending: boolean } | null>(null)
   // Tile reconcile state (#93942 slice 1): shared sequence guard + per-tile
@@ -1282,7 +1212,7 @@ export function useBackgroundSync({
   // the reconcile is signature-gated, so an unchanged transcript costs one
   // cheap tail read. Messaging transcripts keep their own visible poll below.
   useEffect(() => {
-    if (gatewayState !== 'open' || activeIsMessaging) {
+    if (gatewayState !== 'open' || (activeIsMessaging && !warmTranscripts)) {
       return
     }
 
@@ -1311,6 +1241,14 @@ export function useBackgroundSync({
       // The main pane resolves only with a selected session; a workspace whose
       // pane shows just bot tiles has none, and the tile reconcile below still
       // owes those tiles their catch-up.
+      if (warmTranscripts?.hasInactiveRows()) {
+        // A return may be the first signal after sleep; sample the current
+        // sidebar rows before deciding which cached transcripts to read.
+        void warmTranscripts.afterListRefresh(async () => refreshSessions()).catch(() => undefined)
+      }
+      if (activeIsMessaging) {
+        return
+      }
       if (activeSessionId && activeStoredSessionId) {
         requestActiveTranscriptRefresh(true)
       }
@@ -1338,8 +1276,10 @@ export function useBackgroundSync({
     activeSessionId,
     activeStoredSessionId,
     gatewayState,
+    refreshSessions,
     requestActiveTranscriptRefresh,
-    updateSessionState
+    updateSessionState,
+    warmTranscripts
   ])
 
   // A reconnect loses renderer-only working/attention atoms while the backend
@@ -1432,8 +1372,13 @@ export function useBackgroundSync({
 
     const run = () => {
       lastRunAt = Date.now()
-      void refreshSessions()
-      void refreshMessagingSessions()
+      if (warmTranscripts) {
+        // Compare after this pass publishes the new sidebar fingerprints.
+        void warmTranscripts.afterListRefresh(() => Promise.allSettled([refreshSessions(), refreshMessagingSessions()]))
+      } else {
+        void refreshSessions()
+        void refreshMessagingSessions()
+      }
 
       // Archived sessions use their own capped query. Reload it only while the
       // sidebar is showing that view, matching the on-demand fetch contract.
@@ -1519,7 +1464,8 @@ export function useBackgroundSync({
     refreshMessagingSessions,
     refreshSessions,
     requestActiveTranscriptRefresh,
-    updateSessionState
+    updateSessionState,
+    warmTranscripts
   ])
 
   // Keyboard warmth for the deferral above: capture phase on window. Any

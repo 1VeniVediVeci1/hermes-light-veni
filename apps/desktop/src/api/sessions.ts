@@ -533,7 +533,7 @@ export const LATEST_SESSION_MESSAGES_LIMIT = 120
 export function getLatestSessionMessages(
   id: string,
   profile?: ProfileScope,
-  options: { passive?: boolean } = {}
+  options: { passive?: boolean; shouldRecordTail?: (page: SessionMessagesResponse) => boolean } = {}
 ): Promise<SessionMessagesResponse> {
   // Key pagination by the effective request owner, not the caller's spelling
   // (ambient, profile string, or explicit pin). Otherwise refreshes create
@@ -581,10 +581,12 @@ export function getLatestSessionMessages(
       profile: route.profile || page.profile || ambientProfile
     }
 
-    recordTranscriptTail(id, authoritativePage, route, owner)
+    if (!options.shouldRecordTail || options.shouldRecordTail(authoritativePage)) {
+      recordTranscriptTail(id, authoritativePage, route, owner)
 
-    if (authoritativePage.session_id && authoritativePage.session_id !== id) {
-      recordTranscriptTail(authoritativePage.session_id, authoritativePage, route, owner)
+      if (authoritativePage.session_id && authoritativePage.session_id !== id) {
+        recordTranscriptTail(authoritativePage.session_id, authoritativePage, route, owner)
+      }
     }
 
     return authoritativePage
