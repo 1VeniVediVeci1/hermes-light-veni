@@ -221,6 +221,7 @@ export const zhOverrides = {
     updateHermes: '更新 Hermes',
     updateReadyTitle: '有可用更新',
     restartAndUpdate: '重启并更新',
+    lightUpdateFailed: reason => `上次更新失败：${reason}`,
     updateReadyMessage: count => `有 ${count} 项新更改可用。`,
     updateReadyMessageUnknown: '有新更新可用。',
     updateReadyMessageAppInstaller: 'Hermes 新版本已就绪。现在更新，Windows 会自动完成。',

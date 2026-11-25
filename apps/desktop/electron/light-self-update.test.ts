@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createLightSelfUpdater, selectLightRelease } from './light-self-update'
+import { createLightSelfUpdater, lastSwapFailure, selectLightRelease } from './light-self-update'
 
 const { fetch, getPath } = vi.hoisted(() => ({ fetch: vi.fn(), getPath: vi.fn() }))
 vi.mock('electron', () => ({ app: { isPackaged: true, getPath }, net: { fetch } }))
@@ -49,6 +49,22 @@ describe('portable Light release selection', () => {
 })
 
 const sixHours = 6 * 60 * 60 * 1000
+
+describe('swap failure surfacing', () => {
+  it('reports only the most recent attempt, preferring the administrator pass reason', () => {
+    const log = [
+      'T1 Waiting for 1 and other Hermes Light processes under D:\\Program Files\\HermesLight',
+      'T2 Update failed: old reason',
+      'T3 Waiting for 2 and other Hermes Light processes under D:\\Program Files\\HermesLight',
+      'T4 Access denied, requesting administrator rights: denied',
+      'T5 Administrator update failed: file in use',
+      'T6 Update failed: Administrator update failed (exit 1)'
+    ].join('\r\n')
+    expect(lastSwapFailure(log)).toBe('file in use')
+    expect(lastSwapFailure(`${log}\r\nT7 Waiting for 3 and other Hermes Light processes under X\r\nT8 Renamed install to X.old`)).toBeUndefined()
+    expect(lastSwapFailure('')).toBeUndefined()
+  })
+})
 
 describe('Light update polling', () => {
   let fixture: string

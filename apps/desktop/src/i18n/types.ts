@@ -450,6 +450,7 @@ export interface Translations extends NoticeTranslations {
     updateHermes: string
     updateReadyTitle: string
     restartAndUpdate: string
+    lightUpdateFailed: (reason: string) => string
     updateReadyMessage: (count: number) => string
     updateReadyMessageUnknown: string
     updateReadyMessageAppInstaller: string

@@ -417,6 +417,7 @@ export const en: Translations = {
     updateHermes: 'Update Hermes',
     updateReadyTitle: 'Update ready',
     restartAndUpdate: 'Restart and update',
+    lightUpdateFailed: reason => `The last update attempt failed: ${reason}`,
     updateReadyMessage: count => `${count} new change${count === 1 ? '' : 's'} available.`,
     updateReadyMessageUnknown: 'A new update is available.',
     updateReadyMessageAppInstaller: 'A new version of Hermes is ready. Update now and Windows will finish it for you.',

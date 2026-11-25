@@ -126,18 +126,16 @@ async function stageRelease(root: string, release: LightRelease, system32: strin
   }
 }
 
-// Variable paths arrive through the environment; they never become PowerShell source or cmd text.
-const SWAP_SCRIPT = String.raw`param([int]$AppPid = $env:HERMES_LIGHT_SWAP_PID, [string]$InstallDir = $env:HERMES_LIGHT_SWAP_DIR, [string]$Tag = $env:HERMES_LIGHT_SWAP_TAG)
+// Variable paths arrive through the environment (or, for the UAC pass, as -File arguments);
+// they never become PowerShell source or cmd text.
+const SWAP_SCRIPT = String.raw`param([int]$AppPid = $env:HERMES_LIGHT_SWAP_PID, [string]$InstallDir = $env:HERMES_LIGHT_SWAP_DIR, [string]$Tag = $env:HERMES_LIGHT_SWAP_TAG, [switch]$Elevated)
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'payload\HermesLight'
 $zip = Join-Path $PSScriptRoot 'HermesLight-win-x64.zip'
 $log = Join-Path $PSScriptRoot 'swap.log'
 $exe = Join-Path $InstallDir 'Hermes Light.exe'
 $old = "$InstallDir.old-$Tag"
-$next = "$InstallDir.new-$Tag-$([Guid]::NewGuid().ToString('N'))"
 $prefix = $InstallDir + '\'
-$backedUp = $false
-$installed = $false
 $waited = $false
 
 function Write-Log($Message) {
@@ -150,6 +148,13 @@ function Test-AppRunning {
   }
   return $false
 }
+function Test-AccessDenied($Record) {
+  # Directory.Move reports ERROR_ACCESS_DENIED as an IOException carrying E_ACCESSDENIED.
+  for ($e = $Record.Exception; $e; $e = $e.InnerException) {
+    if ($e -is [UnauthorizedAccessException] -or $e.HResult -eq -2147024891) { return $true }
+  }
+  return $false
+}
 function Start-App {
   # Start-Process on Windows PowerShell can treat brackets in WorkingDirectory as wildcards.
   $launch = New-Object Diagnostics.ProcessStartInfo
@@ -157,6 +162,41 @@ function Start-App {
   $launch.WorkingDirectory = $InstallDir
   $launch.UseShellExecute = $false
   [void][Diagnostics.Process]::Start($launch)
+}
+# Copy, swap and drop the backup. Restores the previous install before rethrowing.
+function Install-Payload {
+  $next = "$InstallDir.new-$Tag-$([Guid]::NewGuid().ToString('N'))"
+  $backedUp = $false
+  try {
+    # Staging can be on another drive. Copy to a sibling first, then expose only the complete package.
+    Copy-Item -LiteralPath $source -Destination $next -Recurse -Force
+    if (Test-AppRunning) { throw 'Hermes Light reopened before the swap' }
+    [IO.Directory]::Move($InstallDir, $old)
+    $backedUp = $true
+    Write-Log "Renamed install to $old"
+    [IO.Directory]::Move($next, $InstallDir)
+  } catch {
+    $failure = $_
+    if ($backedUp) {
+      try {
+        [IO.Directory]::Move($old, $InstallDir)
+        Write-Log 'Restored previous installation'
+      } catch {
+        Write-Log "Recovery failed: $_ (backup: $old)"
+      }
+    }
+    throw $failure
+  } finally {
+    if ([IO.Directory]::Exists($next)) {
+      try { [IO.Directory]::Delete($next, $true) } catch { Write-Log "Candidate cleanup failed: $_" }
+    }
+  }
+  try { [IO.Directory]::Delete($old, $true) } catch { Write-Log "Cleanup failed for '$old': $_" }
+}
+
+# Administrator pass: only touches the install directory; the user-level pass launches the app.
+if ($Elevated) {
+  try { Install-Payload; exit 0 } catch { Write-Log "Administrator update failed: $_"; exit 1 }
 }
 
 Write-Log "Waiting for $AppPid and other Hermes Light processes under $InstallDir"
@@ -170,38 +210,33 @@ try {
   if ((Test-Path -LiteralPath $old) -or !(Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Unexpected install or backup path' }
   if (!(Test-Path -LiteralPath (Join-Path $source 'Hermes Light.exe') -PathType Leaf)) { throw 'Staged executable missing' }
 
-  # Staging can be on another drive. Copy to a sibling first, then expose only the complete package.
-  Copy-Item -LiteralPath $source -Destination $next -Recurse -Force
-  if (Test-AppRunning) { throw 'Hermes Light reopened before the swap' }
-  [IO.Directory]::Move($InstallDir, $old)
-  $backedUp = $true
-  Write-Log "Renamed install to $old"
-  [IO.Directory]::Move($next, $InstallDir)
-  $installed = $true
+  try {
+    Install-Payload
+  } catch {
+    # Installs under Program Files need administrator rights to rename; ask UAC once and retry.
+    if (!(Test-AccessDenied $_)) { throw }
+    Write-Log "Access denied, requesting administrator rights: $($_.Exception.Message)"
+    $q = [char]34
+    $arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass ' +
+      "-File $q$PSCommandPath$q -Elevated -AppPid $AppPid -InstallDir $q$InstallDir$q -Tag $q$Tag$q"
+    try {
+      $admin = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+    } catch {
+      throw "Administrator approval was not granted: $($_.Exception.Message)"
+    }
+    if ($admin.ExitCode -ne 0) { throw "Administrator update failed (exit $($admin.ExitCode))" }
+  }
   Start-App
 } catch {
   Write-Log "Update failed: $_"
-  try {
-    if ($backedUp) {
-      if ($installed) { [IO.Directory]::Move($InstallDir, $next) }
-      [IO.Directory]::Move($old, $InstallDir)
-      Write-Log 'Restored previous installation'
-    }
-    if ($waited -and !(Test-AppRunning) -and (Test-Path -LiteralPath $exe -PathType Leaf)) { Start-App }
-  } catch {
-    Write-Log "Recovery failed: $_ (backup: $old)"
+  if ($waited -and !(Test-AppRunning) -and (Test-Path -LiteralPath $exe -PathType Leaf)) {
+    try { Start-App } catch { Write-Log "Relaunch failed: $_" }
   }
   exit 1
-} finally {
-  if ([IO.Directory]::Exists($next)) {
-    try { [IO.Directory]::Delete($next, $true) } catch { Write-Log "Candidate cleanup failed: $_" }
-  }
 }
 
 Write-Log 'Replacement launched'
-foreach ($dir in @($old, $source)) {
-  try { [IO.Directory]::Delete($dir, $true) } catch { Write-Log "Cleanup failed for '$dir': $_" }
-}
+try { [IO.Directory]::Delete($source, $true) } catch { Write-Log "Cleanup failed for '$source': $_" }
 try { Remove-Item -LiteralPath $zip -Force } catch { Write-Log "ZIP cleanup failed: $_" }
 `
 
@@ -219,6 +254,20 @@ interface StagedUpdate {
   stage: string
   installDir: string
   system32: string
+  /** Why the last swap of this stage failed, from its swap.log. */
+  lastFailure?: string
+}
+
+/** The failure reason of the most recent swap attempt recorded in a stage's swap.log. */
+export function lastSwapFailure(logText: string): string | undefined {
+  const lines = logText.split(/\r?\n/)
+  const attempt = lines.findLastIndex(line => / Waiting for \d+ /.test(line))
+  if (attempt < 0) return undefined
+  for (const line of lines.slice(attempt + 1)) {
+    const failure = / (?:Administrator update|Update) failed: (.+)$/.exec(line)
+    if (failure) return failure[1].slice(0, 300)
+  }
+  return undefined
 }
 
 const RECHECK_MS = 6 * 60 * 60 * 1000
@@ -253,7 +302,14 @@ export function createLightSelfUpdater({ light, primary, isQuitting, quitForHand
     const candidate = await prepareUpdate(release, log)
     if (applying || isQuitting()) return
     pending = candidate
-    status = { ...status, supported: true, updateAvailable: true, latestTag: candidate.tag, fetchedAt: Date.now() }
+    status = {
+      ...status,
+      supported: true,
+      updateAvailable: true,
+      latestTag: candidate.tag,
+      message: candidate.lastFailure,
+      fetchedAt: Date.now()
+    }
     onStatus(status)
     // Only clean up after the new stage is ready and owns the offer, so a failed
     // download never invalidates the previous offer or races an apply of it.
@@ -325,7 +381,8 @@ async function prepareUpdate(release: LightRelease, log: LightUpdateOptions['log
   await mkdir(root, { recursive: true })
   if (!(await lstat(root)).isDirectory()) throw new Error('Invalid update cache directory')
   const stage = await stageRelease(root, release, system32, log)
-  return { tag: release.tag, stage, installDir, system32 }
+  const swapLog = await readFile(path.join(stage, 'swap.log'), 'utf8').catch(() => '')
+  return { tag: release.tag, stage, installDir, system32, lastFailure: lastSwapFailure(swapLog) }
 }
 
 async function pruneOlderStages(root: string, tag: string, log: LightUpdateOptions['log']): Promise<void> {

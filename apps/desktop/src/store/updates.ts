@@ -326,7 +326,9 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, t
       icon: 'gift',
       id: UPDATE_TOAST_ID,
       kind: 'info',
-      message: translateNow('shell.statusbar.releaseAvailable', status.latestTag),
+      message: status.message
+        ? `${translateNow('shell.statusbar.releaseAvailable', status.latestTag)} ${translateNow('notifications.lightUpdateFailed', status.message)}`
+        : translateNow('shell.statusbar.releaseAvailable', status.latestTag),
       placement: 'bottom-right',
       title: translateNow('notifications.updateReadyTitle')
     })
