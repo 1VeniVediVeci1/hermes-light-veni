@@ -149,6 +149,14 @@ test('a stored-parent branch travels as the canonical branch mutation on the par
   expect(child).toMatchObject({ session_id: 'c', stored_session_id: 'c', parent_session_id: 'p', message_count: 4 })
 })
 
+test('a warm activate keeps omit_messages so the owner skips the whole-lineage history read', () => {
+  const protocol = new CanonicalDesktopProtocol()
+  const warm = protocol.prepare('session.activate', { session_id: 's', cols: 96, omit_messages: true, profile: 'default' })
+  expect(protocol.wire('session.activate', warm)).toBe('session.resume')
+  expect(warm).toEqual({ session_id: 's', source: 'desktop', omit_messages: true, profile: 'default' })
+  expect(protocol.prepare('session.activate', { session_id: 's' })).toEqual({ session_id: 's', source: 'desktop' })
+})
+
 test('composer branch and model switch become canonical prepared mutations with identity retained', () => {
   const protocol = new CanonicalDesktopProtocol()
   protocol.result('session.resume', { session_id: 's' }, { session_id: 's', revision: 4, execution_generation: 9 })

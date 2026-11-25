@@ -406,7 +406,14 @@ export class CanonicalDesktopProtocol {
     if (method === 'session.create') { return this.prepareCreate(params) }
 
     if (method === 'session.activate') {
-      return { session_id: params.session_id, source: 'desktop', ...(params.profile ? { profile: params.profile } : {}) }
+      // A warm activate repaints from its cache and pages the transcript over REST; without the
+      // owner's `omit_messages` its resume answers with a whole-lineage history read instead.
+      return {
+        session_id: params.session_id,
+        source: 'desktop',
+        ...(params.omit_messages === true ? { omit_messages: true } : {}),
+        ...(params.profile ? { profile: params.profile } : {})
+      }
     }
 
     // N93: a watch window's legacy `lazy` attach is not in the owner's resume contract (the owner
