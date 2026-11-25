@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { group } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
-import type { ChatMessage } from '@/lib/chat-messages'
+import { type ChatMessage, restorePendingClarifyToolCall } from '@/lib/chat-messages'
 import { purgeInFlightTurnJournals, resetInFlightTurnJournalStateForTests } from '@/lib/inflight-turn-journal'
+import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { $activeGatewayProfile } from '@/store/profile'
 import {
   $activeSessionStoredIdRotation,
@@ -1225,6 +1226,58 @@ describe('useSessionStateCache — held transcript gate keeps live rows (#117867
     })
 
     expect($messages.get().map(message => message.id)).toEqual(['cached-1', 'cached-2', 'live-1'])
+  })
+
+  it('shows only the live background question when switching to a held warm transcript', () => {
+    const otherRuntime = 'other-runtime'
+    const request = {
+      questions: [{ choices: null, multiSelect: false, qid: 'q1', question: 'Which path?' }],
+      requestId: 'background-question',
+      sessionId: runtime
+    }
+    let cache!: Cache
+    const onReady = (value: Cache) => (cache = value)
+    setActiveSessionId(otherRuntime)
+    const view = render(<ViewHarness activeSessionId={otherRuntime} onReady={onReady} />)
+    const cached = [assistantText('cached-1', 'Unproven transcript')]
+
+    try {
+      act(() => {
+        cache.updateSessionState(otherRuntime, state => ({ ...state, messages: [userMessage('other', 'Other chat')] }))
+        const projection = restorePendingClarifyToolCall(cached, {
+          args: { questions: [{ question: 'Which path?' }] },
+          tool_id: request.requestId
+        })
+        setClarifyRequest(request)
+        cache.updateSessionState(
+          runtime,
+          state => ({ ...state, messages: projection.messages, needsInput: true, streamId: projection.streamId }),
+          stored
+        )
+      })
+      expect($messages.get().map(message => message.id)).toEqual(['other'])
+
+      const release = cache.holdSessionTranscriptView(runtime)
+      act(() => setActiveSessionId(runtime))
+      view.rerender(<ViewHarness activeSessionId={runtime} onReady={onReady} />)
+      const state = cache.sessionStateByRuntimeIdRef.current.get(runtime)!
+      act(() => cache.syncSessionStateToView(runtime, state))
+
+      expect($messages.get()).toHaveLength(1)
+      expect($messages.get()[0].parts).toEqual([
+        expect.objectContaining({ clarifyRequestId: request.requestId, toolName: 'clarify', type: 'tool-call' })
+      ])
+      expect(cache.sessionStateByRuntimeIdRef.current.get(runtime)?.messages).toBe(state.messages)
+
+      act(() => {
+        clearClarifyRequest(request.requestId, runtime)
+        cache.syncSessionStateToView(runtime, state)
+      })
+      expect($messages.get()).toEqual([])
+      release()
+    } finally {
+      clearClarifyRequest(request.requestId, runtime)
+    }
   })
 
   it('fails closed when the hold was armed with no cached prefix', () => {

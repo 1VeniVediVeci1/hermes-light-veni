@@ -95,7 +95,8 @@ function isAnswerableClarifyMessage(message: ChatMessage): boolean {
 
 export function suppressTranscriptForView(
   state: ClientSessionState,
-  cutoff: TranscriptViewCutoff | null
+  cutoff: TranscriptViewCutoff | null,
+  clarifyRequestId?: string
 ): ClientSessionState {
   if (cutoff === null) {
     return state
@@ -127,6 +128,24 @@ export function suppressTranscriptForView(
 
   if (messages.length === state.messages.length) {
     return state
+  }
+
+  if (clarifyRequestId) {
+    const ownsClarify = (part: ChatMessage['parts'][number]) =>
+      part.type === 'tool-call' &&
+      QUESTION_CARD_TOOLS.has(part.toolName) &&
+      part.result === undefined &&
+      part.clarifyRequestId === clarifyRequestId
+
+    // A background request can already be bound to an arm-time row. Keep
+    // that one live card visible without publishing its unproven transcript.
+    if (!messages.some(message => message.parts.some(ownsClarify))) {
+      const part = state.messages.findLast(message => message.parts.some(ownsClarify))?.parts.find(ownsClarify)
+
+      if (part) {
+        messages.push({ id: `held-clarify-${clarifyRequestId}`, pending: true, role: 'assistant', parts: [part] })
+      }
+    }
   }
 
   return { ...state, messages }

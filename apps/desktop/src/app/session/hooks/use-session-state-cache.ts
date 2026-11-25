@@ -7,6 +7,7 @@ import { preserveLocalAssistantErrors, reconcileLocalAssistantTimeline } from '@
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { migrateInFlightTurnJournal, persistInFlightTurnState } from '@/lib/inflight-turn-journal'
 import { setMutableRef } from '@/lib/mutable-ref'
+import { $clarifyRequests } from '@/store/clarify'
 import { adoptPendingRuntimeTabs, rekeyPreviewTabsSession } from '@/store/preview'
 import {
   $activeSessionId,
@@ -477,7 +478,7 @@ export function useSessionStateCache({
       }
 
       const gate = transcriptViewGateByRuntimeIdRef.current.get(sessionId)
-      const viewState = suppressTranscriptForView(state, gate ?? null)
+      const viewState = suppressTranscriptForView(state, gate ?? null, $clarifyRequests.get()[sessionId]?.requestId)
 
       syncRuntimeMetadataToView(viewState)
       pendingViewStateRef.current = { live: liveDelta, sessionId, state: viewState }
