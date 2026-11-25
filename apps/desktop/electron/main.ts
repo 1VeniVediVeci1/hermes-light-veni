@@ -454,7 +454,7 @@ import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { PrimaryProfilePin, resolveLaunchProfile } from './primary-profile-pin'
 import { connectPrimaryRemote } from './primary-remote-startup'
 import { relaunchLightElevated } from './light-elevation'
-import { createLightSelfUpdater } from './light-self-update'
+import { createLightSelfUpdater, LIGHT_RELEASE_REPO, readLightDisplayVersion } from './light-self-update'
 import { applyDesktopIdentity, PRODUCT_IDENTITY } from './product-identity'
 import { registerProfileBackendIpc } from './profile-backend-ipc'
 import {
@@ -16717,17 +16717,20 @@ function showAboutPanelFresh(): void {
 }
 
 ipcMain.handle('hermes:version', async (_event, scope?: { connectionId?: string; profile?: string }) => {
-  const [skew, version, clientVersion] = await Promise.all([
+  const [skew, version, clientVersion, lightVersion] = await Promise.all([
     detectRendererSkew(),
     resolveHermesVersion(scope),
-    resolveDesktopClientVersion(INSTALL_STAMP, resolveUpdateRoot(), HERMES_HOME, app.getVersion())
+    resolveDesktopClientVersion(INSTALL_STAMP, resolveUpdateRoot(), HERMES_HOME, app.getVersion()),
+    PRODUCT_IDENTITY.light ? readLightDisplayVersion().catch(() => null) : null
   ])
 
   return {
     ...appVersionInfo(INSTALL_STAMP, version, app.getVersion()),
+    // A published Light build names itself by its own release, not the upstream version it is based on.
+    ...(lightVersion ? { appVersion: lightVersion, releaseRepo: LIGHT_RELEASE_REPO } : {}),
     // Both sides, labelled: the backend the active connection runs, and this machine's install.
     backendVersion: version,
-    clientVersion,
+    clientVersion: lightVersion ?? clientVersion,
     electronVersion: process.versions.electron,
     nodeVersion: process.versions.node,
     platform: process.platform,

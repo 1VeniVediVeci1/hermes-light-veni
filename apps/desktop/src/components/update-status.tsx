@@ -340,13 +340,19 @@ export function UpdateStatusCard({
     return <></>
   }
 
-  return <UpdateStatusCardBody showReleaseNotes={showReleaseNotes} target={target} />
+  // A Light build's own releases live in its release repository; the backend keeps upstream's notes.
+  const releaseNotesUrl =
+    target === 'client' && version?.releaseRepo ? `https://github.com/${version.releaseRepo}/releases` : RELEASE_NOTES_URL
+
+  return <UpdateStatusCardBody releaseNotesUrl={releaseNotesUrl} showReleaseNotes={showReleaseNotes} target={target} />
 }
 
 function UpdateStatusCardBody({
+  releaseNotesUrl,
   showReleaseNotes,
   target
 }: {
+  releaseNotesUrl: string
   showReleaseNotes: boolean
   target: UpdateTarget
 }): ReactElement {
@@ -419,10 +425,10 @@ function UpdateStatusCardBody({
           {showReleaseNotes && (
             <Button asChild className="ml-auto" size="sm" variant="text">
               <a
-                href={RELEASE_NOTES_URL}
+                href={releaseNotesUrl}
                 onClick={event => {
                   event.preventDefault()
-                  void window.hermesDesktop?.openExternal?.(RELEASE_NOTES_URL)
+                  void window.hermesDesktop?.openExternal?.(releaseNotesUrl)
                 }}
                 rel="noreferrer"
                 target="_blank"

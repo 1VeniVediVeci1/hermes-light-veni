@@ -43,6 +43,16 @@ export function selectLightRelease(value: unknown, ownTag: string): LightRelease
   return { tag, url, size: asset.size, sha256: digest?.slice(7).toLowerCase() }
 }
 
+/** The repository Light releases come from (also where About links its notes and commits). */
+export const LIGHT_RELEASE_REPO = REPO
+
+/** This build's release tag as a calendar version (`light-20261125-102237` -> `2026.11.25-102237`), or null. */
+export async function readLightDisplayVersion(): Promise<string | null> {
+  const tag = await readOwnTag()
+  const parts = tag && /^light-(\d{4})(\d{2})(\d{2})-(\d{6})$/.exec(tag)
+  return parts ? `${parts[1]}.${parts[2]}.${parts[3]}-${parts[4]}` : null
+}
+
 async function readOwnTag(): Promise<string | null> {
   const stamp = await readFile(path.join(process.resourcesPath, 'light-release.json'), 'utf8').catch(error => {
     if (error.code === 'ENOENT') return null

@@ -951,6 +951,8 @@ export interface DesktopVersionInfo {
   /** True when the bundle on disk is newer than the running process — a plain
    *  app restart (no rebuild, no installer) is enough to load it. */
   bundleSwapPending?: boolean
+  /** `owner/name` of the GitHub repository this build is released from (Light builds). */
+  releaseRepo?: string
 }
 
 /** Where an external build's backend came from. Mirrors the resolution ladder
