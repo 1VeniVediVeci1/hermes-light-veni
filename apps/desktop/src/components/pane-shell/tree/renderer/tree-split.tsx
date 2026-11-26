@@ -17,6 +17,7 @@ import { cn } from '@/lib/utils'
 import { $paneStates, type PaneStateSnapshot, setPaneHeightOverride, setPaneWidthOverride } from '@/store/panes'
 
 import { $layoutEditMode, $layoutEditRevealsHidden } from '../../edit-mode'
+import { PaneVisibleContext, usePaneVisible } from '../../pane-visibility'
 import type { LayoutNode, SplitNode } from '../model'
 import { allPaneIds } from '../model'
 import {
@@ -103,6 +104,7 @@ export function TreeSplit({
   rightEdge?: boolean
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const parentVisible = usePaneVisible()
   const panes = useContributions('panes')
   const hiddenPanes = useStore($hiddenTreePanes)
   const narrow = useStore($narrowViewport)
@@ -779,15 +781,17 @@ export function TreeSplit({
               />
             )}
             {!narrowCollapsed && (
-              <TreeNode
-                leftEdge={leftEdge && (!horizontal || i === visibleOrder[0])}
-                node={child}
-                parentAxis={axis}
-                railSide={horizontal ? railSideFor(i) : undefined}
-                rightEdge={rightEdge && (!horizontal || i === visibleOrder[visibleOrder.length - 1])}
-                rootRow={rootRow || childRootRow(child)}
-                topEdge={topEdge && (horizontal || i === visibleOrder[0])}
-              />
+              <PaneVisibleContext.Provider value={parentVisible && !collapsed}>
+                <TreeNode
+                  leftEdge={leftEdge && (!horizontal || i === visibleOrder[0])}
+                  node={child}
+                  parentAxis={axis}
+                  railSide={horizontal ? railSideFor(i) : undefined}
+                  rightEdge={rightEdge && (!horizontal || i === visibleOrder[visibleOrder.length - 1])}
+                  rootRow={rootRow || childRootRow(child)}
+                  topEdge={topEdge && (horizontal || i === visibleOrder[0])}
+                />
+              </PaneVisibleContext.Provider>
             )}
           </div>
         )

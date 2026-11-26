@@ -21,7 +21,7 @@ import { clearAllPrompts, clearApprovalRequest } from '@/store/prompts'
 import { markRuntimeGone } from '@/store/runtime-gone'
 import { getSessionOwnerHint, knownSessionOwner, ownerLookupSessionRows, requestSessionResume } from '@/store/session'
 import type { SessionOwnerScope } from '@/store/session-request-router'
-import { $sessionTiles, dropSessionState, sessionTileDelegate, unbindTileRuntime } from '@/store/session-states'
+import { $sessionTiles, dropSessionState, patchSessionTile, unbindTileRuntime } from '@/store/session-states'
 // Leaf import (not the `@/themes` barrel) to avoid pulling the ThemeProvider
 // module graph into the gateway event hot path.
 import { ingestBackendSkin } from '@/themes/backend-sync'
@@ -218,7 +218,7 @@ function handleReplayGapEvent(ctx: GatewayEventContext): boolean {
   }
 
   const tile = $sessionTiles.get().find(candidate => {
-    if (candidate.runtimeId !== runtimeId) {
+    if (candidate.runtimeId ? candidate.runtimeId !== runtimeId : candidate.storedSessionId !== storedSessionId) {
       return false
     }
 
@@ -226,9 +226,9 @@ function handleReplayGapEvent(ctx: GatewayEventContext): boolean {
   })
 
   if (tile) {
-    void sessionTileDelegate()
-      ?.resumeTile(tile.storedSessionId, { authoritativeSnapshot: true })
-      .catch(() => undefined)
+    // An idle background tab does not need a full snapshot to recover a gap.
+    // Keep the authoritative requirement until the tile is visible or running.
+    patchSessionTile(tile.storedSessionId, { pendingResume: { snapshot: true } })
   }
 
   return true

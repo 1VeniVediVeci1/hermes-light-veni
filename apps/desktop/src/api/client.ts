@@ -4,6 +4,7 @@ import {
   type GatewayEvent,
   type GatewayEventName,
   JsonRpcGatewayClient,
+  JsonRpcGatewayError,
   type ServerRequest,
   type ServerRequestHandler
 } from '@hermes/shared'
@@ -14,6 +15,7 @@ import { desktopClientIdentity } from '@/lib/client-identity'
 
 import { CanonicalDesktopProtocol, canonicalProfile, canonicalPromptParams, canonicalSessionKey, openGatewaySocket, recordCanonicalOwner, splitRewindSubmit } from './canonical-protocol'
 import { DialReadiness, GATEWAY_NOT_CONNECTED_MESSAGE, remainingRequestBudget } from './dial-readiness'
+import { RESTORE_SNAPSHOT, SessionRestoreSnapshots } from './session-restore-snapshot'
 
 // Desktop startup fires a burst of read-only data calls (config, profiles,
 // model info/options, cron) the moment the backend passes readiness. On a
@@ -112,6 +114,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
   // Frames of an ambiguous (session, epoch) parked until its owner probes settle.
   private readonly parkedFrames = new Map<string, Array<() => void>>()
   private connectionGeneration = 0
+  private readonly restoreSnapshots = new SessionRestoreSnapshots()
 
   override onRequest(handler: ServerRequestHandler): () => void {
     this.promptHandlers.add(handler)
@@ -188,6 +191,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
   override close(): void {
     this.readiness.fail()
     this.connectionGeneration++
+    this.restoreSnapshots.forget()
     this.deliveredPrompts.clear()
     this.sessionProfiles.clear()
     this.profileAliases.clear()
@@ -368,6 +372,7 @@ export class HermesGateway extends JsonRpcGatewayClient {
     const generation = ++this.connectionGeneration
     this.nativeDial = new URL(wsUrl).searchParams.has('native_dial')
     this.canonical = this.nativeDial
+    this.restoreSnapshots.forget()
     this.attached.clear()
     this.deliveredPrompts.clear()
     this.sessionProfiles.clear()
@@ -435,6 +440,10 @@ export class HermesGateway extends JsonRpcGatewayClient {
 
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     const generation = this.connectionGeneration
+
+    const reuseRestore = (params as { [RESTORE_SNAPSHOT]?: boolean })[RESTORE_SNAPSHOT] === true &&
+      params.omit_messages === true && (method === 'session.resume' || method === 'session.activate')
+
     // Attachment RPCs can carry the entire file in one frame, even outside the composer.
     const isAttachment = ATTACHMENT_METHODS.has(method)
     timeoutMs ??= isAttachment ? 0 : undefined
@@ -448,7 +457,11 @@ export class HermesGateway extends JsonRpcGatewayClient {
       this.requireConnectionGeneration(generation)
     }
 
-    if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), remainingRequestBudget(deadline, signal), signal) }
+    if (!this.canonical) {
+      return this.requestWithRestoreSnapshot(method, params, reuseRestore, generation, () =>
+        super.request<T>(method, legacyParams(method, params), remainingRequestBudget(deadline, signal), signal), signal)
+    }
+
     const redirected = this.canonicalRedirect<T>(method, params, timeoutMs, deadline, signal)
 
     if (redirected) { return redirected }
@@ -473,6 +486,55 @@ export class HermesGateway extends JsonRpcGatewayClient {
     // owner refuses the unknown key, so it rides only where `client.capabilities` advertised it.
     if (method === 'prompt.submit' && this.backendClarifyBatch) { params = { ...params, clarify_batch: true } }
 
+    return this.requestWithRestoreSnapshot(method, params, reuseRestore, generation,
+      () => this.requestCanonical<T>(method, params, deadline, generation, signal), signal)
+  }
+
+  private async requestWithRestoreSnapshot<T>(
+    method: string, params: Record<string, unknown>, reuse: boolean, generation: number,
+    send: () => Promise<T>, signal?: AbortSignal
+  ): Promise<T> {
+    const id = typeof params.session_id === 'string' ? params.session_id : undefined
+    const profile = this.canonical && id ? this.resolveSessionProfile(id, params.profile) : params.profile
+
+    if (id && reuse && this.connectionState === 'open') {
+      signal?.throwIfAborted()
+      const snapshot = this.restoreSnapshots.get<T>(profile, id)
+
+      if (snapshot !== undefined) { return snapshot }
+    }
+
+    // Do not let a recent binding hide an explicit detach, rebuild or 4001.
+    if (id && !reuse && ['session.close', 'session.detach', 'session.delete', 'session.resume', 'session.activate'].includes(method)) {
+      this.restoreSnapshots.forget(id)
+    }
+
+    try {
+      const result = await send()
+
+      if (id && reuse && generation === this.connectionGeneration && this.connectionState === 'open') {
+        this.restoreSnapshots.record(profile, id, result)
+
+        if (result && typeof result === 'object' && 'session_id' in result && typeof result.session_id === 'string') {
+          const runtimeProfile = this.canonical ? this.resolveSessionProfile(result.session_id, profile) : profile
+          this.restoreSnapshots.record(runtimeProfile, result.session_id, result)
+        }
+      }
+
+      return result
+    } catch (error) {
+      if (id && error instanceof JsonRpcGatewayError &&
+        (error.code === 4001 || (error.data as { reason?: string } | undefined)?.reason === 'not_found')) {
+        this.restoreSnapshots.forget(id)
+      }
+
+      throw error
+    }
+  }
+
+  private async requestCanonical<T>(
+    method: string, params: Record<string, unknown>, deadline: number, generation: number, signal?: AbortSignal
+  ): Promise<T> {
     let prepared = this.protocol.prepare(method, params)
     const wireMethod = this.protocol.wire(method, prepared)
 
@@ -611,6 +673,13 @@ export class HermesGateway extends JsonRpcGatewayClient {
     }))
     super.onState(state => this.readiness.trackTransport(state))
     this.onEvent(event => {
+      if (event.type === 'session.reclaimed' || event.type === 'session.replay_gap' ||
+        event.type === 'message.start' || event.type === 'message.complete') {
+        const id = event.session_id ?? (event.payload as { session_id?: string } | undefined)?.session_id
+
+        if (id) { this.restoreSnapshots.forget(id) }
+      }
+
       if (!this.canonical) { return }
 
       if (event.type in CANONICAL_PROMPT_EVENTS) {

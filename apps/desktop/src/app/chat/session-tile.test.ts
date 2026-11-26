@@ -17,15 +17,13 @@ import {
   type SessionTile
 } from '@/store/session-states'
 
+import { requestCloseSessionTile, startTileBackendIdentityGuard, startUnrestoredTileTitleBackfill } from './session-tile'
 import {
-  requestCloseSessionTile,
   sessionTileResumeFailure,
   shouldResumeSessionTile,
-  startTileBackendIdentityGuard,
-  startUnrestoredTileTitleBackfill,
   unbindTilesForBackendIdentityChange,
   WRONG_BACKEND_TILE_ERROR
-} from './session-tile'
+} from './session-tile-restore'
 
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),

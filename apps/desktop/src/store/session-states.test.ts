@@ -137,7 +137,7 @@ describe('resetTileRuntimeBindings', () => {
 
     expect(invalidateRuntimeBindings).toHaveBeenCalledTimes(1)
     expect($sessionTiles.get()).toEqual([
-      { anchor: undefined, before: undefined, dir: undefined, storedSessionId: 'stored-a' }
+      { anchor: undefined, before: undefined, dir: undefined, pendingResume: { snapshot: false }, storedSessionId: 'stored-a' }
     ])
   })
 
@@ -555,6 +555,7 @@ describe('SessionTile workspace scope', () => {
       anchor: undefined,
       before: undefined,
       dir: undefined,
+      pendingResume: { snapshot: false },
       storedSessionId: 'bot-chat',
       workspaceMode: 'bots',
       workspaceOwnerKey: 'connection-a::default'

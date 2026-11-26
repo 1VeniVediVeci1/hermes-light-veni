@@ -1,5 +1,7 @@
 import { useEffect } from 'react'
 
+import { RESTORE_SNAPSHOT } from '@/api/session-restore-snapshot'
+import { watchLiveSessionTileRestores } from '@/app/chat/session-tile-restore'
 import {
   extendRefreshPageToOverlap,
   graftRefreshedTailOntoBackfill,
@@ -32,6 +34,7 @@ import {
 } from '@/store/session-request-router'
 import {
   $sessionTiles,
+  patchSessionTile,
   publishSessionState,
   sessionTileOwnerRoute,
   setSessionTileDelegate
@@ -394,7 +397,17 @@ export function useSessionTileDelegate({
         const cached = existing ? sessionStateByRuntimeIdRef.current.get(existing) : undefined
         const resumeRequestBaselineMessages = cached?.messages ?? []
         const refreshTranscript = options?.refreshTranscript === true
-        const authoritativeSnapshot = options?.authoritativeSnapshot === true
+        const pendingResume = $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.pendingResume
+        const authoritativeSnapshot = options?.authoritativeSnapshot === true || pendingResume?.snapshot === true
+        const reuseRecentAttachment = options?.reuseRecentAttachment && !authoritativeSnapshot && !refreshTranscript
+
+        const finishResume = (runtimeId: string) => {
+          if (pendingResume && $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.pendingResume === pendingResume) {
+            patchSessionTile(storedSessionId, { error: undefined, pendingResume: undefined, runtimeId })
+          }
+
+          return runtimeId
+        }
 
         // Warm path: reuse a live binding — but only when it still carries a
         // transcript (or is mid-turn, where messages legitimately stream in).
@@ -407,7 +420,7 @@ export function useSessionTileDelegate({
         // warm snapshot is whatever the tile last painted, and cron bot-chat
         // deliveries that landed while the panel's WS was down never arrive
         // as realtime events (#96183).
-        if (existing && isWarmTileState(cached, storedSessionId) && !refreshTranscript && !authoritativeSnapshot) {
+        if (existing && isWarmTileState(cached, storedSessionId) && !pendingResume && !refreshTranscript && !authoritativeSnapshot) {
           publishSessionState(existing, cached)
 
           return existing
@@ -426,7 +439,7 @@ export function useSessionTileDelegate({
           ? Promise.resolve(null)
           : getLatestSessionMessages(storedSessionId, restScope).catch(() => null)
 
-        if (!authoritativeSnapshot && existing && isWarmTileState(cached, storedSessionId)) {
+        if (refreshTranscript && !authoritativeSnapshot && existing && isWarmTileState(cached, storedSessionId)) {
           const prefetch = await prefetchPromise
 
           // A long turn can push every rendered row off the newest page; read
@@ -453,7 +466,9 @@ export function useSessionTileDelegate({
             storedSessionId
           )
 
-          return existing
+          if (!pendingResume) {
+            return existing
+          }
         }
 
         // #94724 no-owner recovery: dispatching the resume through the same
@@ -473,6 +488,7 @@ export function useSessionTileDelegate({
                   session_id: storedSessionId,
                   cols: 96,
                   omit_messages: !authoritativeSnapshot,
+                  ...(reuseRecentAttachment ? { defer_history: true, [RESTORE_SNAPSHOT]: true } : {}),
                   ...(owner ? { profile: typeof owner === 'string' ? owner : owner.profile } : {})
                 }),
               { requiresMessages: authoritativeSnapshot, scope: owner }
@@ -494,6 +510,10 @@ export function useSessionTileDelegate({
 
         const prefetch = await prefetchPromise
 
+        if (pendingResume !== $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.pendingResume) {
+          throw new Error('Session attachment changed while restoring the tile')
+        }
+
         if (outcome.mode === 'read-only') {
           const readOnlyId = readOnlyRuntimeIdFor(storedSessionId)
 
@@ -514,7 +534,7 @@ export function useSessionTileDelegate({
             message: translateNow('desktop.readOnlyTranscriptBody')
           })
 
-          return readOnlyId
+          return finishResume(readOnlyId)
         }
 
         const resumed = outcome.resumed
@@ -584,7 +604,7 @@ export function useSessionTileDelegate({
           storedSessionId
         )
 
-        return runtimeId
+        return finishResume(runtimeId)
       },
       submitToSession: async (runtimeId, text) => {
         const storedSessionId = storedSessionIdForRuntime(runtimeId)
@@ -638,6 +658,8 @@ export function useSessionTileDelegate({
       },
       updateSession: (runtimeId, updater) => updateSessionState(runtimeId, updater)
     })
+
+    return watchLiveSessionTileRestores()
   }, [
     archiveSession,
     branchLoadedSession,

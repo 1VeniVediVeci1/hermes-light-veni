@@ -1228,6 +1228,8 @@ export interface SessionTile {
   before?: null | string
   /** Live runtime id once the tile's resume has bound one. */
   runtimeId?: string
+  /** Socket attachment needs renewal; the durable runtime/transcript may still be usable. */
+  pendingResume?: { snapshot: boolean }
   /** Resume failed terminally (shown in the tile; retryable). */
   error?: string
   /** Presentation workspace this tab belongs to. Missing legacy values are Sessions. */
@@ -1993,8 +1995,8 @@ export function setSessionTileWorkspaceScope(storedSessionId: string, scope: Ses
   return true
 }
 
-/** Drop live runtime bindings so every tile re-resumes — used on gateway
- *  reconnect, where a respawned backend re-mints (recycles) runtime ids.
+/** Invalidate the affected socket's tile attachments. Visible tiles reattach
+ *  immediately; idle, hidden tiles wait until opened.
  *  Also invalidates the wiring cache's stored→runtime map: clearing only the
  *  tile atoms left `resumeTile`'s warm path free to re-bind the same dead
  *  runtime id from the cache, so post-wake tiles repainted empty and never
@@ -2007,8 +2009,7 @@ export interface RuntimeReconnectScope {
 /** Fallback scope for a restarted connection whose registry identity is
  *  unknown (a legacy remote primary with no connectionId). We cannot name the
  *  dead owner, so instead preserve only Bot runtimes whose owner is provably
- *  alive elsewhere; every other binding is dropped and re-resumes. A reset
- *  only costs a re-resume, so unknown owners fail toward recovery. */
+ *  alive elsewhere; every other attachment is invalidated for on-demand resume. */
 export interface UnknownRuntimeReconnectScope {
   liveConnectionIds: ReadonlySet<string>
 }
@@ -2069,8 +2070,21 @@ export function resetTileRuntimeBindings(
 
   sessionTileDelegate()?.invalidateRuntimeBindings?.(preservedStoredIds)
 
-  if (tiles.some(tile => tile.runtimeId && !preservedStoredIds.has(tile.storedSessionId))) {
-    $sessionTiles.set(tiles.map(tile => (preservedStoredIds.has(tile.storedSessionId) ? tile : toStored(tile))))
+  const resumedOnAnotherSocket = (tile: SessionTile) =>
+    Boolean(tile.ownerRoute?.connectionId && (reconnected || liveConnectionIds) && !belongsToReconnectedRuntime(tile))
+
+  const next = tiles.map(tile => {
+    if (resumedOnAnotherSocket(tile)) {
+      return tile
+    }
+
+    const pendingResume = { snapshot: tile.pendingResume?.snapshot === true }
+
+    return { ...(preservedStoredIds.has(tile.storedSessionId) ? tile : toStored(tile)), pendingResume }
+  })
+
+  if (next.some((tile, index) => tile !== tiles[index])) {
+    $sessionTiles.set(next)
   }
 }
 
@@ -2106,9 +2120,9 @@ export function resetRouteOwnedTileRuntimeBindings(scope: RuntimeReconnectScope)
 
   sessionTileDelegate()?.dropRuntimeBindings?.(ownedStoredIds)
 
-  if (tiles.some(tile => tile.runtimeId && ownedStoredIds.has(tile.storedSessionId))) {
-    $sessionTiles.set(tiles.map(tile => (ownedStoredIds.has(tile.storedSessionId) ? toStored(tile) : tile)))
-  }
+  $sessionTiles.set(tiles.map(tile => ownedStoredIds.has(tile.storedSessionId)
+    ? { ...toStored(tile), pendingResume: { snapshot: tile.pendingResume?.snapshot === true } }
+    : tile))
 }
 
 /** Unbind ONE reclaimed runtime from whichever tile holds it — the targeted
@@ -2125,7 +2139,8 @@ export function unbindTileRuntime(runtimeId: string) {
   const tiles = $sessionTiles.get()
 
   if (tiles.some(t => t.runtimeId === runtimeId)) {
-    $sessionTiles.set(tiles.map(t => (t.runtimeId === runtimeId ? { ...t, runtimeId: undefined } : t)))
+    $sessionTiles.set(tiles.map(t => (t.runtimeId === runtimeId
+      ? { ...t, pendingResume: { snapshot: t.pendingResume?.snapshot === true }, runtimeId: undefined } : t)))
   }
 }
 
@@ -2168,7 +2183,7 @@ export interface SessionTileDelegate {
    *  `authoritativeSnapshot` forces a message-bearing gateway resume. */
   resumeTile(
     storedSessionId: string,
-    options?: { authoritativeSnapshot?: boolean; refreshTranscript?: boolean }
+    options?: { authoritativeSnapshot?: boolean; refreshTranscript?: boolean; reuseRecentAttachment?: boolean }
   ): Promise<string>
   /** Retire one runtime's busy/awaiting claim through the wiring cache
    *  (updateSessionState), so cache, focused view, busyRef, and tile mirrors
