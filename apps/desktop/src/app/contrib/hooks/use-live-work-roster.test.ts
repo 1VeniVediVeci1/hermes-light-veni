@@ -1,3 +1,4 @@
+import { JsonRpcRequestChannel } from '@hermes/shared'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,6 +15,8 @@ const h = vi.hoisted(() => ({
   owners: new Map<string, unknown>(),
   open: new Set<string>(),
   request: vi.fn(),
+  requestBatch: vi.fn(),
+  shared: new Set<string>(),
   rows: [] as { id: string }[]
 }))
 
@@ -27,7 +30,17 @@ vi.mock('@/store/gateway', async importOriginal => ({
 
     return { key, open: key === 'primary:default' || h.open.has(key) }
   },
-  isActivePrimary: () => true
+  isActivePrimary: () => true,
+  primaryRosterBatchRoute: () => {
+    const gateway = $gateway.get()
+
+    return gateway && {
+      gateway,
+      isCurrent: () => $gateway.get() === gateway,
+      mayShare: (id: string | null) => !id || id === 'local',
+      selector: async (_id: string | null, profile: string) => h.shared.has(profile) ? { profile } : null
+    }
+  }
 }))
 
 vi.mock('@/store/session', async importOriginal => ({
@@ -68,10 +81,12 @@ beforeEach(() => {
   vi.useFakeTimers()
   h.owners.clear()
   h.open.clear()
+  h.shared.clear()
+  h.requestBatch.mockReset()
   h.rows = []
   h.request.mockReset()
   h.request.mockResolvedValue({ sessions: [] })
-  $gateway.set({ request: vi.fn() } as unknown as HermesGateway)
+  $gateway.set({ request: h.requestBatch, subagentRosterBatch: Promise.resolve(false) } as unknown as HermesGateway)
   $gatewayState.set('open')
   $liveWorkRoster.set({})
 })
@@ -88,7 +103,66 @@ function withRows(owners: Record<string, unknown>) {
   Object.entries(owners).forEach(([id, owner]) => h.owners.set(id, owner))
 }
 
+it('learns batch support from the existing client hello and resets it on a new socket', async () => {
+  const channel = new JsonRpcRequestChannel()
+  const ready = JSON.stringify({ method: 'event', params: { type: 'gateway.ready', payload: {} } })
+
+  for (const flag of [true, undefined]) {
+    const send = vi.fn<(frame: string) => void>()
+    channel.attach({ send })
+    const negotiated = channel.subagentRosterBatch
+    channel.handleFrame(ready)
+    expect(send).toHaveBeenCalledTimes(1)
+    const hello = JSON.parse(send.mock.calls[0][0])
+    expect(hello.method).toBe('client.capabilities')
+    channel.handleFrame(JSON.stringify({ id: hello.id, result: { subagent_roster_batch: flag } }))
+    await expect(negotiated).resolves.toBe(Boolean(flag))
+    channel.detach(new Error('socket closed'))
+  }
+})
+
 describe('useLiveWorkRoster', () => {
+  it('uses one RPC for five shared profiles, backs off only a failed entry, and reads another host separately', async () => {
+    const shared = ['advisor', 'coder', 'scholar', 'stock']
+    shared.forEach(profile => h.shared.add(profile))
+    withRows({
+      a: 'advisor', c: 'coder', s: 'scholar', t: 'stock',
+      remote: { connectionId: 'other-host', profile: 'coder' }
+    })
+    shared.forEach(profile => h.open.add(`::${profile}`))
+    h.open.add('other-host::coder')
+    h.requestBatch.mockImplementation(async (_method, { profiles }: { profiles: (string | null)[] }) => ({
+      results: profiles.map(profile => profile === 'coder'
+        ? { error: { code: 4064 } }
+        : { sessions: [{ session_id: profile ?? 'launch', subagents: 1 }] })
+    }))
+    $gateway.set({ request: h.requestBatch, subagentRosterBatch: Promise.resolve(true) } as unknown as HermesGateway)
+
+    renderHook(() => useLiveWorkRoster())
+    await tick(0)
+    expect(h.requestBatch).toHaveBeenCalledTimes(1)
+    expect(h.requestBatch).toHaveBeenLastCalledWith('subagent.roster', { profiles: [null, ...shared] }, 10_000)
+    expect(h.request.mock.calls.map(([owner]) => owner)).toEqual([{ connectionId: 'other-host', profile: 'coder' }])
+    expect($liveWorkRoster.get()['::advisor']?.sessions.advisor?.subagents).toBe(1)
+    expect($liveWorkRoster.get()['::coder']).toBeUndefined()
+    await tick()
+    expect(h.requestBatch).toHaveBeenCalledTimes(2)
+    expect(h.requestBatch).toHaveBeenLastCalledWith('subagent.roster', { profiles: [null, 'advisor', 'scholar', 'stock'] }, 10_000)
+    expect(h.request).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps making single reads when the socket did not advertise batching', async () => {
+    h.shared.add('coder')
+    h.open.add('::coder')
+    withRows({ c: 'coder' })
+    renderHook(() => useLiveWorkRoster())
+    await tick(0)
+    await tick()
+    expect(h.requestBatch).not.toHaveBeenCalled()
+    expect(callsFor('ambient')).toBe(2)
+    expect(callsFor('coder')).toBe(2)
+  })
+
   it('asks the launch profile once a tick however many spellings its rows carry', async () => {
     withRows({ a: 'default', b: { connectionId: 'local', profile: 'default' } })
     renderHook(() => useLiveWorkRoster())

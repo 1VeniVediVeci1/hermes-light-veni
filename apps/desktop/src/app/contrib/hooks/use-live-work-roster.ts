@@ -2,8 +2,9 @@ import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
+import { withTimeout } from '@/lib/with-timeout'
 import { $backgroundRunningSessionIds } from '@/store/composer-status'
-import { $gateway, activeGatewayProfileKey, gatewayRouteState, isActivePrimary } from '@/store/gateway'
+import { $gateway, activeGatewayProfileKey, gatewayRouteState, isActivePrimary, primaryRosterBatchRoute } from '@/store/gateway'
 import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
 import { $liveWorkRoster, rosterSourceHasWork, setLiveWorkRosterSource } from '@/store/live-work-roster'
 import { $gatewayState, ownerLookupSessionRows } from '@/store/session'
@@ -18,10 +19,16 @@ const COLD_BUSY_MS = 60_000
 // Window focus re-reads every source at most this often (alt-tab bursts).
 const FOCUS_MIN_GAP_MS = 5_000
 const MAX_BACKOFF_MS = 5 * 60_000
+// Do not hold any read behind a slow capability hello / route lookup.
+const BATCH_PLAN_MS = 1_000
+const MAX_BATCH_PROFILES = 64
 
 interface RosterResult {
   sessions?: unknown[]
 }
+
+type RosterBatchResult = { results?: (RosterResult & { error?: unknown })[] }
+type RosterRead = [key: string, source: RosterSource]
 
 interface RosterSource {
   /** Stored ids of the rows this source answers for. */
@@ -41,10 +48,11 @@ const routeOf = (owner: SessionOwnerScope) =>
  *  three times a tick). The ambient socket answers for the active profile; a row owned by another profile (or connection) is asked on
  *  the route its own session RPCs take, so each backend only reports
  *  conversations stored in that profile. */
-function rosterSources(): Map<string, RosterSource> {
-  // The ambient read carries no profile, so it shares a key only when it IS the
-  // window primary answering for its own profile.
-  const ambientKey = isActivePrimary() ? gatewayRouteState(null, activeGatewayProfileKey()).key : 'ambient'
+function rosterSources(gateway: NonNullable<ReturnType<typeof $gateway.get>>): Map<string, RosterSource> {
+  const primary = isActivePrimary()
+  // The ambient read carries no profile. It shares a bucket only with the
+  // primary's own profile or with the exact active secondary socket.
+  const ambientKey = primary ? gatewayRouteState(null, activeGatewayProfileKey()).key : 'ambient'
   const sources = new Map<string, RosterSource>([[ambientKey, { covers: [], open: true, owner: undefined }]])
 
   // One row list per tick, each owner resolved against its own row: resolving
@@ -57,12 +65,13 @@ function rosterSources(): Map<string, RosterSource> {
     }
 
     const route = routeOf(owner)
-    const source = sources.get(route.key)
+    const key = !primary && route.gateway === gateway ? ambientKey : route.key
+    const source = sources.get(key)
 
     if (source) {
       source.covers.push(row.id)
     } else {
-      sources.set(route.key, { covers: [row.id], open: route.open, owner })
+      sources.set(key, { covers: [row.id], open: route.open, owner })
     }
   }
 
@@ -70,16 +79,15 @@ function rosterSources(): Map<string, RosterSource> {
 }
 
 /** App-level hydration of `$liveWorkRoster` (sidebar rows not on screen, and
- *  every row after a reload / socket reconnect): one `subagent.roster` read per
- *  backend on connect and window focus, then every 10 s while the window is
- *  visible. Each source reads and publishes on its own, with a one-tick request
- *  timeout, so a hung backend never freezes the other sources' rows. Interval
- *  ticks are passive: after a source's first read on this connection they read
- *  only sockets already open, plus a closed one whose last read showed work once
- *  a minute (so a finished child clears without re-dialing every tick). A backend
- *  without the RPC stops for this connection; any other failure backs off (focus
- *  included) and keeps retrying, so a recovered socket comes back on its own. */
+ *  every row after a reload / socket reconnect): one read on each socket on
+ *  connect and window focus, then every 10 s while visible. Multiplexed profiles
+ *  batch when the socket advertised support; dedicated sockets stay independent.
+ *  Interval ticks are passive: after a source's first read on this connection
+ *  they read only sockets already open, plus a closed one whose last read showed
+ *  work once a minute (so finished work clears without re-dialing every tick).
+ *  A backend without the RPC stops; any other failure backs off and retries. */
 export function useLiveWorkRoster() {
+  const gateway = useStore($gateway)
   const gatewayState = useStore($gatewayState)
   // Route keys (`primary:<profile>`, `ambient`) name a socket, not a backend:
   // a soft re-home of the primary must start over, even while the foreground
@@ -91,62 +99,173 @@ export function useLiveWorkRoster() {
     // (re)connect re-reads them.
     $liveWorkRoster.set({})
 
-    if (gatewayState !== 'open') {
+    if (gatewayState !== 'open' || !gateway) {
       return
     }
 
+    const ambient = ambientRequestFor(gateway)
     let cancelled = false
     let lastHydrate = -Infinity
     let current = new Set<string>()
     const inFlight = new Set<string>()
     const unsupported = new Set<string>()
-    // When each source was last asked on this connection: rows that load after
-    // the connect (the session list, a newly shown profile) get their first read.
+    const incompatibleBatch = new WeakSet<Promise<boolean>>()
+    // Rows that load after the connect get their first read on the next tick.
     const sentAt = new Map<string, number>()
     const backoff = new Map<string, { failures: number; until: number }>()
 
-    const readSource = async (
-      key: string,
-      { covers, owner }: RosterSource,
-      ambient: ReturnType<typeof ambientRequestFor>
-    ) => {
-      const at = Date.now()
-      sentAt.set(key, at)
-      inFlight.add(key)
+    const failed = (key: string, error: unknown) => {
+      if (isMissingRpcMethod(error)) {
+        unsupported.add(key)
+      } else {
+        const failures = (backoff.get(key)?.failures ?? 0) + 1
+        backoff.set(key, { failures, until: Date.now() + Math.min(POLL_MS * 2 ** failures, MAX_BACKOFF_MS) })
+      }
+
+      if (!cancelled && current.has(key)) {
+        setLiveWorkRosterSource(key, null)
+      }
+    }
+
+    const publish = ([key, { covers }]: RosterRead, result: RosterResult, at: number) => {
+      backoff.delete(key)
+
+      // A source whose rows left the sidebar mid-read stays pruned.
+      if (!cancelled && current.has(key)) {
+        setLiveWorkRosterSource(key, Array.isArray(result?.sessions) ? result.sessions : [], at, covers)
+      }
+    }
+
+    const readSource = async (read: RosterRead) => {
+      const [key, { owner }] = read
 
       try {
-        const result = await requestForSessionProfile<RosterResult>(owner, ambient, 'subagent.roster', {}, POLL_MS)
-        backoff.delete(key)
-
-        // A source whose rows left the sidebar mid-read stays pruned.
         if (!cancelled && current.has(key)) {
-          setLiveWorkRosterSource(key, Array.isArray(result?.sessions) ? result.sessions : [], at, covers)
+          const at = Date.now()
+          sentAt.set(key, at)
+          const result = await requestForSessionProfile<RosterResult>(owner, ambient, 'subagent.roster', {}, POLL_MS)
+          publish(read, result, at)
         }
       } catch (error) {
-        if (isMissingRpcMethod(error)) {
-          unsupported.add(key)
-        } else {
-          const failures = (backoff.get(key)?.failures ?? 0) + 1
-          backoff.set(key, { failures, until: Date.now() + Math.min(POLL_MS * 2 ** failures, MAX_BACKOFF_MS) })
-        }
-
-        if (!cancelled) {
-          setLiveWorkRosterSource(key, null)
-        }
+        failed(key, error)
       } finally {
         inFlight.delete(key)
       }
     }
 
-    const refresh = (hydrate: boolean) => {
-      const gateway = $gateway.get()
+    const readSources = async (reads: RosterRead[]) => {
+      const route = primaryRosterBatchRoute()
+      const capability = route?.gateway.subagentRosterBatch
 
-      if (cancelled || !gateway) {
+      if (!route || !capability || incompatibleBatch.has(capability)) {
+        reads.forEach(read => void readSource(read))
+
         return
       }
 
-      const ambient = ambientRequestFor(gateway)
-      const sources = rosterSources()
+      const candidates = reads.filter(read => {
+        const { owner } = read[1]
+
+        const eligible = owner === undefined ? gateway === route.gateway :
+          route.mayShare(isSessionOwnerRoute(owner) ? owner.connectionId : null)
+
+        if (!eligible) {
+          void readSource(read)
+        }
+
+        return eligible
+      })
+
+      if (candidates.length < 2 || candidates.length > MAX_BATCH_PROFILES) {
+        candidates.forEach(read => void readSource(read))
+
+        return
+      }
+
+      let planExpired = false
+
+      const selectors = await withTimeout(capability.then(supported => {
+        if (!supported || cancelled || planExpired || route.gateway.subagentRosterBatch !== capability) {
+          return []
+        }
+
+        return Promise.all(candidates.map(([, { owner }]) => {
+          if (owner === undefined) {
+            return { profile: null }
+          }
+
+          const [connectionId, profile] = isSessionOwnerRoute(owner)
+            ? [owner.connectionId, owner.profile] as const : [null, String(owner)] as const
+
+          return route.selector(connectionId, profile).catch(() => null)
+        }))
+      }), BATCH_PLAN_MS, 'Roster batch route not ready', () => { planExpired = true }).catch(() => [])
+
+      const batch = candidates.flatMap((read, i) => {
+        const selector = selectors[i]
+
+        return selector && current.has(read[0]) ? [{ read, profile: selector.profile }] : []
+      })
+
+      const routeStillCurrent = () => route.isCurrent() && route.gateway.subagentRosterBatch === capability
+
+      if (cancelled || batch.length < 2 || !routeStillCurrent()) {
+        candidates.forEach(read => void readSource(read))
+
+        return
+      }
+
+      const batched = new Set(batch.map(({ read }) => read))
+      candidates.filter(read => !batched.has(read)).forEach(read => void readSource(read))
+      const at = Date.now()
+      batch.forEach(({ read: [key] }) => sentAt.set(key, at))
+      let fallback = false
+
+      try {
+        const profiles = batch.map(({ profile }) => profile)
+        const result = await route.gateway.request<RosterBatchResult>('subagent.roster', { profiles }, POLL_MS)
+
+        if (!routeStillCurrent()) {
+          return
+        }
+
+        const rows = result?.results
+
+        if (!Array.isArray(rows) || rows.length !== batch.length) {
+          fallback = true
+
+          return
+        }
+
+        batch.forEach(({ read }, i) => {
+          const item = rows[i]
+
+          if (!Array.isArray(item?.sessions) || item.error) {
+            failed(read[0], item?.error)
+          } else {
+            publish(read, item, at)
+          }
+        })
+      } catch (error) {
+        if (routeStillCurrent()) {
+          batch.forEach(({ read: [key] }) => failed(key, error))
+        }
+      } finally {
+        if (fallback) {
+          incompatibleBatch.add(capability)
+          batch.forEach(({ read }) => void readSource(read))
+        } else {
+          batch.forEach(({ read: [key] }) => inFlight.delete(key))
+        }
+      }
+    }
+
+    const refresh = (hydrate: boolean) => {
+      if (cancelled) {
+        return
+      }
+
+      const sources = rosterSources(gateway)
       const roster = $liveWorkRoster.get()
       const now = Date.now()
       // Rows lit right now: a closed source covering one is re-read on the busy
@@ -162,6 +281,8 @@ export function useLiveWorkRoster() {
         }
       }
 
+      const reads: RosterRead[] = []
+
       for (const [key, source] of sources) {
         const last = sentAt.get(key)
         const due = !inFlight.has(key) && !unsupported.has(key) && now >= (backoff.get(key)?.until ?? 0)
@@ -173,8 +294,13 @@ export function useLiveWorkRoster() {
           ((rosterSourceHasWork(roster, key) || source.covers.some(id => lit.has(id))) && now - last >= COLD_BUSY_MS)
 
         if (due && warm) {
-          void readSource(key, source, ambient)
+          inFlight.add(key)
+          reads.push([key, source])
         }
+      }
+
+      if (reads.length) {
+        void readSources(reads)
       }
     }
 
@@ -200,5 +326,5 @@ export function useLiveWorkRoster() {
       window.clearInterval(timer)
       window.removeEventListener('focus', hydrate)
     }
-  }, [gatewayState, primaryConnection, primaryMode])
+  }, [gateway, gatewayState, primaryConnection, primaryMode])
 }

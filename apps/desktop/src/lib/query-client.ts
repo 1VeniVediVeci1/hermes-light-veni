@@ -90,7 +90,9 @@ const PROFILE_INDEPENDENT_QUERY_ROOTS = new Set<string>([
   'marketplace-themes',
   'marketplace-themes-settings',
   'onboarding-model-options',
-  'contrib-logs-tail'
+  'contrib-logs-tail',
+  // Catalogs carry their own connection generation and profile/session keys.
+  'command-catalog'
 ])
 
 // Invalidate profile-scoped query caches on a profile / gateway switch, leaving

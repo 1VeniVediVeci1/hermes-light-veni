@@ -95,6 +95,8 @@ describe('desktop slash description localization', () => {
           }
     )
 
+    const gateway = { request } as unknown as HermesGateway
+
     const api: {
       search?: (query: string) => readonly Unstable_TriggerItem[]
       setLocale?: ReturnType<typeof useI18n>['setLocale']
@@ -102,7 +104,7 @@ describe('desktop slash description localization', () => {
 
     function Probe() {
       api.setLocale = useI18n().setLocale
-      api.search = useSlashCompletions({ gateway: { request } as unknown as HermesGateway }).adapter?.search
+      api.search = useSlashCompletions({ gateway }).adapter?.search
 
       return null
     }

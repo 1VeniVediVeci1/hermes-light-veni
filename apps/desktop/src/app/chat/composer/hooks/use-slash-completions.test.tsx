@@ -3,7 +3,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesGateway } from '@/hermes'
-import { queryClient } from '@/lib/query-client'
+import { invalidateProfileScopedQueries, queryClient } from '@/lib/query-client'
 import { invalidateSlashCompletions } from '@/lib/slash-completion-cache'
 
 import { isSkillItem } from '../composer-utils'
@@ -41,7 +41,7 @@ const RANKED_CATALOG = {
 const commandsOf = (items: readonly Unstable_TriggerItem[]) =>
   items.map(item => (item.metadata as { command?: string })?.command)
 
-function harness(gateway: HermesGateway, options: { profile?: string } = {}) {
+function harness(gateway: HermesGateway, options: { profile?: string; sessionId?: string } = {}) {
   const api: { search?: (query: string) => readonly Unstable_TriggerItem[] } = {}
 
   function Probe() {
@@ -93,6 +93,33 @@ describe('useSlashCompletions', () => {
     await act(async () => invalidateSlashCompletions())
     await completions(api, '')
     expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('coalesces draft catalogs within one connection/profile and does not reuse one for a different connection or session', async () => {
+    const request = vi.fn().mockResolvedValue(CATALOG)
+    const gateway = { request } as unknown as HermesGateway
+    const first = harness(gateway, { profile: 'coder' })
+    const second = harness(gateway, { profile: 'coder' })
+    await completions(first, '')
+    await completions(second, '')
+    expect(request.mock.calls).toEqual([['commands.catalog', { profile: 'coder' }]])
+
+    await act(async () => invalidateProfileScopedQueries())
+    await completions(harness(gateway, { profile: 'coder' }), '')
+    expect(request).toHaveBeenCalledTimes(1)
+    await completions(harness(gateway, { profile: 'advisor' }), '')
+    await completions(harness(gateway, { profile: 'coder', sessionId: 'chat-a' }), '')
+    await completions(harness(gateway, { profile: 'coder', sessionId: 'chat-b' }), '')
+    expect(request.mock.calls.slice(1)).toEqual([
+      ['commands.catalog', { profile: 'advisor' }],
+      ['commands.catalog', { session_id: 'chat-a' }],
+      ['commands.catalog', { session_id: 'chat-b' }]
+    ])
+
+    const remoteRequest = vi.fn().mockResolvedValue({ pairs: [['/remote-only', 'Remote skill']] })
+    const other = harness({ request: remoteRequest } as unknown as HermesGateway, { profile: 'coder' })
+    expect(commandsOf(await completions(other, ''))).toEqual(['/remote-only'])
+    expect(remoteRequest).toHaveBeenCalledTimes(1)
   })
 
   // A draft has no session yet, so the backend would otherwise scan the LAUNCH
