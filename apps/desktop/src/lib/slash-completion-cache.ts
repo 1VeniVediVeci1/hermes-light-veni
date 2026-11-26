@@ -1,18 +1,51 @@
 import { atom } from 'nanostores'
 
+import type { HermesGateway } from '@/hermes'
 import { queryClient } from '@/lib/query-client'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 
-// Root for every cached `/` completion response — the bare-slash catalog and
-// each typed query. Not in PROFILE_INDEPENDENT_QUERY_ROOTS, so a profile or
-// gateway switch drops it with the rest of the profile-scoped cache.
 const SLASH_COMPLETIONS_KEY = 'slash-completions'
+const COMMAND_CATALOG_KEY = 'command-catalog'
+const COMMAND_CATALOG_TTL_MS = 60_000
+const gatewayIds = new WeakMap<HermesGateway, number>()
+let nextGatewayId = 0
 
-// The command catalog and its completions are a scan of the command registry
-// plus the skills on disk: they change when a skill is added, removed, or
-// toggled — not while the user types. Both gateway calls are expensive on the
-// backend (a full skills-dir scan per request), so hold the answer for an hour
-// and let the mutation sites invalidate it when the truth actually moves.
+/** Draft catalogs have no session workspace. An attached session needs its own
+ * key even in the same profile: trusted project skills are workspace-dependent. */
+export function commandCatalogKey(gateway: HermesGateway, scope: string, sessionId?: string | null, cwd?: string | null) {
+  let id = gatewayIds.get(gateway)
+
+  if (id === undefined) {
+    id = ++nextGatewayId
+    gatewayIds.set(gateway, id)
+  }
+
+  return [COMMAND_CATALOG_KEY, id, gateway.catalogConnectionGeneration, scope, sessionId ?? null, cwd ?? null] as const
+}
+
+type CatalogKey = ReturnType<typeof commandCatalogKey>
+
+// Do not shorten the existing session-scoped cache to optimize draft opens.
+const catalogTtl = (key: CatalogKey) => key[4] ? SLASH_COMPLETIONS_TTL_MS : COMMAND_CATALOG_TTL_MS
+
+export function cachedCommandCatalog<T>(key: CatalogKey, fetcher: () => Promise<T>): Promise<T> {
+  return queryClient.fetchQuery({
+    queryKey: key,
+    queryFn: fetcher,
+    staleTime: catalogTtl(key),
+    gcTime: catalogTtl(key),
+    retry: false
+  })
+}
+
+export function hasCachedCommandCatalog(key: CatalogKey): boolean {
+  const state = queryClient.getQueryState(key)
+
+  return state?.data !== undefined && !state.isInvalidated && Date.now() - state.dataUpdatedAt < catalogTtl(key)
+}
+
+// Cache typed slash completions between keystrokes; mutations and skills.changed
+// invalidate them. Draft catalogs use a shorter backstop for config/usage changes.
 const SLASH_COMPLETIONS_TTL_MS = 60 * 60_000
 
 /** Serve a `/` completion response from cache, fetching only when stale. */
@@ -35,16 +68,6 @@ export function hasCachedSlashCompletion(key: string): boolean {
   const state = queryClient.getQueryState([SLASH_COMPLETIONS_KEY, key])
 
   return state?.data !== undefined && Date.now() - state.dataUpdatedAt < SLASH_COMPLETIONS_TTL_MS
-}
-
-/**
- * Read a cached completion response without fetching. For data that improves a
- * response but must not cost a round trip to get — the catalog's per-skill
- * usage map, which refines the ordering of a typed query but is not worth
- * delaying that query for.
- */
-export function peekCachedSlashCompletion<T>(key: string): T | undefined {
-  return hasCachedSlashCompletion(key) ? queryClient.getQueryData<T>([SLASH_COMPLETIONS_KEY, key]) : undefined
 }
 
 // `@` path completions are a directory listing, which unlike the command
@@ -87,20 +110,26 @@ export const $slashCompletionsEpoch = atom(0)
  * the backend without waiting out the TTL.
  */
 export function invalidateSlashCompletions(): void {
+  // Remove pending catalogs too, so an answer from before the mutation
+  // cannot refill the cache after this invalidation.
+  queryClient.removeQueries({ queryKey: [COMMAND_CATALOG_KEY] })
+  invalidateTypedSlashCompletions()
+}
+
+function invalidateTypedSlashCompletions(): void {
   void queryClient.invalidateQueries({ queryKey: [SLASH_COMPLETIONS_KEY] })
   $slashCompletionsEpoch.set($slashCompletionsEpoch.get() + 1)
 }
 
-// Each profile has its own skills directory, so a cached catalog is only valid
-// for the profile that produced it. Dropped at the source rather than in the
-// composer so it holds whether or not a chat is mounted at switch time.
+// The catalog has an explicit connection/profile key. Typed completion
+// keys still include ambient scopes, so clear them on profile switches.
 let cachedProfile: null | string = null
 
 $activeGatewayProfile.subscribe(value => {
   const key = normalizeProfileKey(value)
 
   if (cachedProfile !== null && cachedProfile !== key) {
-    invalidateSlashCompletions()
+    invalidateTypedSlashCompletions()
   }
 
   cachedProfile = key

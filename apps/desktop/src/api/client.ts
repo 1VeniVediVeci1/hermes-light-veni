@@ -336,6 +336,11 @@ export class HermesGateway extends JsonRpcGatewayClient {
     return desktopClientIdentity()
   }
 
+  /** A reused client object must not replay cached reads across socket generations. */
+  get catalogConnectionGeneration(): number {
+    return this.connectionGeneration
+  }
+
   /** The session wire this connection negotiated; null until its readiness settles. */
   get sessionWire(): GatewaySessionWire | null {
     return this.readiness.ready ? (this.canonical ? 'canonical' : 'legacy') : null

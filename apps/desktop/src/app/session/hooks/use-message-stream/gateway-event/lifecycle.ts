@@ -3,6 +3,7 @@ import type { HermesSkin } from '@hermes/shared/skin'
 
 import { invalidateContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
 import { eventSourceMatchesOwner, gatewayEventSource } from '@/lib/replay-gap-owner'
+import { invalidateSlashCompletions } from '@/lib/slash-completion-cache'
 import { clearClarifyRequest } from '@/store/clarify'
 import {
   noteGatewayReady,
@@ -46,6 +47,14 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
 
   if (event.type === 'gateway.ready') {
     onGatewayReady((event as GatewayEvent<'gateway.ready'>).payload, fromActiveSource())
+
+    return true
+  }
+
+  if (event.type === 'skills.changed') {
+    // The notification covers every skill root the sending gateway has seen,
+    // with no per-profile/project selector in its payload.
+    invalidateSlashCompletions()
 
     return true
   }

@@ -276,7 +276,7 @@ function isPrimaryRegistryRoute(connectionId: null | string, profile: string): b
  *  the chat's transport fan-out and the renderer receives every event twice
  *  (garbled streaming text + a duplicate interim bubble, #120005). Isolated
  *  SSH/pooled backends (neither flag) still get their own secondary. */
-async function ridesPrimaryBackend(connectionId: null | string, profile: string): Promise<boolean> {
+async function ridesPrimaryBackend(connectionId: null | string, profile: string, allowRemoteFallback = true): Promise<boolean> {
   const id = String(connectionId ?? '').trim()
   const key = normKey(profile)
 
@@ -308,11 +308,57 @@ async function ridesPrimaryBackend(connectionId: null | string, profile: string)
     // A failed remote probe rides primary to avoid a ghost socket (#96493).
     // A local probe must fail closed: guessing primary can mint a session on the
     // wrong owner (#101416), while a second dial can duplicate the host socket (#120005).
-    if ($primaryGatewayRoute.get().mode === 'local') {
+    if (!allowRemoteFallback || $primaryGatewayRoute.get().mode === 'local') {
       throw error
     }
 
     return true
+  }
+}
+
+/** A batch may use only the actual primary socket, never a stale rider hint or
+ * a fallback guess after a failed route lookup. Dedicated sockets keep their
+ * own single reads and normal dial/lease behavior. */
+export function primaryRosterBatchRoute() {
+  const gateway = g.primaryGateway
+
+  if (!gateway || !isOpen(gateway)) {
+    return null
+  }
+
+  const owner = primaryIdentity()
+  const primary = $primaryGatewayRoute.get()
+  const launchProfile = g.primaryProfile
+
+  const isCurrent = () =>
+    g.primaryGateway === gateway && isOpen(gateway) && g.primaryProfile === launchProfile &&
+    $primaryGatewayRoute.get() === primary
+
+  return {
+    gateway,
+    isCurrent,
+    mayShare: (connectionId: string | null) => !connectionId || connectionId === owner.connectionId,
+    async selector(connectionId: string | null, profile: string): Promise<{ profile: string | null } | null> {
+      const key = normKey(profile)
+
+      if (!isCurrent() || (connectionId && connectionId !== owner.connectionId)) {
+        return null
+      }
+
+      if (key === launchProfile) {
+        return { profile: null }
+      }
+
+      const shared = connectionId ? await ridesPrimaryBackend(connectionId, key, false) : await sharedPrimaryRoute(key)
+
+      if (!isCurrent() || !shared) {
+        return null
+      }
+
+      notePrimaryRider(owner, registryBackendScopeKey(connectionId, key), true)
+
+      return { profile: key }
+    }
   }
 }
 

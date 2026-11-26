@@ -1,5 +1,4 @@
 import { translateNow } from '@/i18n/runtime'
-import { peekCachedSlashCompletion } from '@/lib/slash-completion-cache'
 
 import desktopSlashRegistry from './desktop-slash-registry.json'
 
@@ -477,7 +476,7 @@ export function rememberDesktopCommandsCatalog(catalog: CommandsCatalogLike | un
 }
 
 function liveCatalog(): CommandsCatalogLike | undefined {
-  return rememberedCatalog ?? peekCachedSlashCompletion<CommandsCatalogLike>('catalog')
+  return rememberedCatalog
 }
 
 function catalogMeta(command: string): CommandCatalogMeta | undefined {

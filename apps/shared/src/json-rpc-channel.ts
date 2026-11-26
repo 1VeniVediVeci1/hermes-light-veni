@@ -233,6 +233,8 @@ export class JsonRpcRequestChannel {
   private announcedTo: JsonRpcTransport | null = null
   /** The bound generation's backend keeps `client.activity` reports (`client.capabilities`). */
   private backendClientActivity = false
+  private rosterBatchCapability = Promise.resolve(false)
+  private resolveRosterBatchCapability: (supported: boolean) => void = () => undefined
   private readonly requestHandlers: ServerRequestHandler[] = []
   private readonly options: Required<
     Omit<JsonRpcRequestChannelOptions, 'onEvent' | 'onHeartbeatFailure' | 'onRequestHandlerError' | 'onUncorrelatedError' | 'onUnhandledRequest'>
@@ -272,6 +274,11 @@ export class JsonRpcRequestChannel {
     return this.backendClientActivity
   }
 
+  /** A promise for this socket's existing hello, never a second capability query. */
+  get subagentRosterBatch(): Promise<boolean> {
+    return this.rosterBatchCapability
+  }
+
   get connected(): boolean {
     return this.transport !== null
   }
@@ -284,6 +291,8 @@ export class JsonRpcRequestChannel {
     this.backendCountsDeclines = false
     this.backendClarifyBatch = false
     this.backendClientActivity = false
+    this.resolveRosterBatchCapability(false)
+    this.rosterBatchCapability = new Promise(resolve => { this.resolveRosterBatchCapability = resolve })
 
     // First on the socket, before the owner's own requests: the backend reads frames in order, and its
     // answer to the boot's first onboarding.state already depends on this. A call of its own, so a
@@ -299,6 +308,8 @@ export class JsonRpcRequestChannel {
     this.transport = null
     // Nothing is known about the next backend until its own `client.capabilities` answer.
     this.backendClientActivity = false
+    this.resolveRosterBatchCapability(false)
+    this.rosterBatchCapability = Promise.resolve(false)
     this.rejectAllPending(error)
   }
 
@@ -583,15 +594,24 @@ export class JsonRpcRequestChannel {
   private advertiseCapabilities(): void {
     const transport = this.transport
 
-    this.request<Partial<ClientCapabilitiesResult> | null>('client.capabilities', { server_requests: true })
+    // Light also connects to older, independently upgraded gateways. Their
+    // generated client.capabilities contract may predate this additive flag.
+    this.request<(Partial<ClientCapabilitiesResult> & { subagent_roster_batch?: boolean }) | null>(
+      'client.capabilities', { server_requests: true }
+    )
       .then(result => {
         if (this.transport === transport) {
           this.backendCountsDeclines = result?.declines_not_shown === true
           this.backendClarifyBatch = result?.canonical_clarify_batch === true
           this.backendClientActivity = result?.client_activity === true
+          this.resolveRosterBatchCapability(result?.subagent_roster_batch === true)
         }
       })
-      .catch(() => undefined)
+      .catch(() => {
+        if (this.transport === transport) {
+          this.resolveRosterBatchCapability(false)
+        }
+      })
 
     if (this.announcedTo === transport) {
       return

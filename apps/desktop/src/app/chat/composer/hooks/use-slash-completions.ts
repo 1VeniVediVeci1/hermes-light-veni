@@ -15,12 +15,22 @@ import {
   isDesktopSlashExtensionCommand,
   isDesktopSlashSuggestionWithOptions,
   rankSkillCommands,
+  rememberDesktopCommandsCatalog,
   slashCompletionGroup
 } from '@/lib/desktop-slash-commands'
-import { $slashCompletionsEpoch, cachedSlashCompletion, hasCachedSlashCompletion } from '@/lib/slash-completion-cache'
+import {
+  $slashCompletionsEpoch,
+  cachedCommandCatalog,
+  cachedSlashCompletion,
+  commandCatalogKey,
+  hasCachedCommandCatalog,
+  hasCachedSlashCompletion
+} from '@/lib/slash-completion-cache'
 import { normalize } from '@/lib/text'
+import { $activeGatewayRoute, gatewayRouteState } from '@/store/gateway'
 import { onboardingChatStore } from '@/store/onboarding-session'
 import { $sessions } from '@/store/session'
+import { isSessionOwnerRoute } from '@/store/session-request-router'
 
 import { completionOwner, completionOwnerKey, requestCompletion } from './completion-route'
 import type { CompletionEntry, CompletionPayload } from './use-live-completion-adapter'
@@ -71,6 +81,7 @@ export function useSlashCompletions(options: {
    *  session's repo, so the catalog and each query are fetched and cached per
    *  session. */
   sessionId?: string | null
+  cwd?: string | null
   /** The tile's routed profile: scopes the palette while a draft has no session yet (#124651). */
   profile?: string | null
   /** Desktop theme list — `/skin` is owned client-side, so its arg completions
@@ -78,7 +89,8 @@ export function useSlashCompletions(options: {
   skinThemes?: DesktopThemeCommandOption[]
   activeSkin?: string
 }): SlashCompletions {
-  const { gateway, sessionId, profile, skinThemes, activeSkin } = options
+  const { gateway, sessionId, profile, cwd, skinThemes, activeSkin } = options
+  const ambientProfile = useStore($activeGatewayRoute)
   const { locale } = useI18n()
   const enabled = Boolean(gateway)
   const epoch = useStore($slashCompletionsEpoch)
@@ -95,8 +107,18 @@ export function useSlashCompletions(options: {
     const owner = completionOwner(sessionId)
     const scopeKey = sessionId ? `${completionOwnerKey(owner)}:${sessionId}` : profile ? `profile:${profile}` : ''
 
-    return { catalogKey: scopeKey ? `catalog:${scopeKey}` : 'catalog', owner, scopeKey }
+    return { owner, scopeKey }
   }, [sessionId, profile])
+
+  const catalogKeyFor = useCallback((client: HermesGateway, owner: ReturnType<typeof completionOwner>) => {
+    const routed = isSessionOwnerRoute(owner)
+      ? gatewayRouteState(owner.connectionId, owner.profile).gateway
+      : owner ? gatewayRouteState(null, owner).gateway : null
+
+    const scope = owner ? completionOwnerKey(owner) : `profile:${profile || ambientProfile}`
+
+    return commandCatalogKey(routed ?? client, scope, sessionId, sessionId ? cwd : null)
+  }, [ambientProfile, cwd, profile, sessionId])
 
   // Warm argument_mode before the first `/` so Space treats /review as text.
   useEffect(() => {
@@ -104,18 +126,22 @@ export function useSlashCompletions(options: {
       return
     }
 
-    const { catalogKey, owner } = keysFor()
-
-    void cachedSlashCompletion(catalogKey, () =>
+    const { owner } = keysFor()
+    let current = true
+    void cachedCommandCatalog(catalogKeyFor(gateway, owner), () =>
       requestCompletion<CommandsCatalogLike>(gateway, owner, 'commands.catalog', sessionParams)
     )
       .then(catalog => {
-        filterDesktopCommandsCatalog(catalog)
+        if (current) {
+          rememberDesktopCommandsCatalog(catalog)
+        }
       })
       .catch(() => {
         // Next keystroke retries; don't block the composer on a warm-up miss.
       })
-  }, [gateway, epoch, keysFor, sessionParams])
+
+    return () => { current = false }
+  }, [gateway, epoch, keysFor, catalogKeyFor, sessionParams])
 
   const fetcher = useCallback(
     async (query: string): Promise<CompletionPayload> => {
@@ -184,12 +210,12 @@ export function useSlashCompletions(options: {
         return { items, query }
       }
 
-      const { catalogKey, owner, scopeKey } = keysFor()
+      const { owner, scopeKey } = keysFor()
 
       try {
         if (!query) {
           const catalog = filterDesktopCommandsCatalog(
-            await cachedSlashCompletion(catalogKey, () =>
+            await cachedCommandCatalog(catalogKeyFor(gateway, owner), () =>
               requestCompletion<CommandsCatalogLike>(gateway, owner, 'commands.catalog', sessionParams)
             )
           )
@@ -305,7 +331,7 @@ export function useSlashCompletions(options: {
         return { items: [], query }
       }
     },
-    [gateway, skinThemes, activeSkin, keysFor, sessionParams]
+    [gateway, skinThemes, activeSkin, keysFor, catalogKeyFor, sessionParams]
   )
 
   const toItem = useCallback((entry: CompletionEntry, index: number): Unstable_TriggerItem => {
@@ -347,11 +373,12 @@ export function useSlashCompletions(options: {
         return true
       }
 
-      const { catalogKey, scopeKey } = keysFor()
+      const { owner, scopeKey } = keysFor()
 
-      return hasCachedSlashCompletion(query ? `slash:${scopeKey}:${text.toLowerCase()}` : catalogKey)
+      return query ? hasCachedSlashCompletion(`slash:${scopeKey}:${text.toLowerCase()}`) :
+        Boolean(gateway && hasCachedCommandCatalog(catalogKeyFor(gateway, owner)))
     },
-    [skinThemes, keysFor]
+    [gateway, skinThemes, keysFor, catalogKeyFor]
   )
 
   const live = useLiveCompletionAdapter({ enabled, epoch: `${epoch}:${locale}`, fetcher, isCached, toItem })

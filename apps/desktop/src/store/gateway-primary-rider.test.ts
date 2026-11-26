@@ -24,6 +24,7 @@ const {
   configureGatewayRegistry,
   gatewayRouteState,
   requestGatewayForProfile,
+  primaryRosterBatchRoute,
   setPrimaryGateway,
   setPrimaryGatewayConnectionId
 } = await import('./gateway')
@@ -54,6 +55,26 @@ describe('primary rider hint', () => {
     setPrimaryGateway(primary() as never, 'default')
 
     expect(gatewayRouteState(null, 'venture').key).toBe('venture')
+  })
+
+  it('only batches explicit primary riders and invalidates a plan after a re-home', async () => {
+    const host = {
+      ...shared(),
+      getConnectionFor: vi.fn(async ({ profile }: { profile: string }) => ({ sharedRemote: profile === 'venture' }))
+    }
+
+    ;(window as unknown as { hermesDesktop: unknown }).hermesDesktop = host
+    setPrimaryGateway(primary() as never, 'default')
+    setPrimaryGatewayConnectionId('conn-a', 'remote')
+    const route = primaryRosterBatchRoute()!
+
+    await expect(route.selector('conn-a', 'default')).resolves.toEqual({ profile: null })
+    await expect(route.selector('conn-a', 'venture')).resolves.toEqual({ profile: 'venture' })
+    await expect(route.selector('conn-a', 'dedicated')).resolves.toBeNull()
+    await expect(route.selector('conn-b', 'venture')).resolves.toBeNull()
+    expect(host.getConnectionFor).toHaveBeenCalledTimes(2)
+    setPrimaryGatewayConnectionId('conn-b', 'remote')
+    expect(route.isCurrent()).toBe(false)
   })
 
   it('drops the hint when the same primary socket is re-homed to another connection', async () => {

@@ -300,6 +300,7 @@ export function ChatBar({
 
   const slash = useSlashCompletions({
     activeSkin: themeName,
+    cwd,
     gateway: gateway ?? null,
     profile: profile ?? null,
     sessionId: sessionId ?? null,

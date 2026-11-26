@@ -235,6 +235,11 @@ export class JsonRpcGatewayClient {
     return this.channel.clientActivity
   }
 
+  /** The roster poll may start before the socket's capability reply arrives. */
+  get subagentRosterBatch(): Promise<boolean> {
+    return this.channel.subagentRosterBatch
+  }
+
   async connect(wsUrl: string): Promise<void> {
     // Refuse garbage; WebSocket coerces non-strings into
     // `ws://<origin>/[object%20Object]` (#68250 stale-emit boot loop).
