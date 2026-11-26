@@ -451,6 +451,7 @@ export function useGatewayBoot({
     }
 
     let bootCompleted = false
+    let reconnectProfile: string | undefined
     // The other way a cold boot concludes. Main keeps startHermes() available
     // after the renderer gave up, and every later getConnection() caller
     // re-enters it, replaying `backend.resolve` (running:true) then
@@ -646,37 +647,19 @@ export function useGatewayBoot({
           return
         }
 
+        reconnectProfile = manual?.profile
         await gateway.connect(wsUrl)
 
         if (cancelled) {
           return
         }
 
-        // A respawned backend re-mints (recycles) runtime ids, so any tile's
-        // bound runtime id is now stale — drop them so each tile re-resumes.
-        // A legacy remote primary has no registry identity to scope by; fall
-        // back to preserving only Bot runtimes owned by provably-live
-        // secondaries so the restarted backend's own tiles still rebind.
-        const primaryConnectionId = primaryRuntimeConnectionId(conn)
-        resetTileRuntimeBindings(
-          manual && primaryConnectionId
-            ? { connectionId: primaryConnectionId, profile: manual.profile }
-            : (primaryConnectionId ?? { liveConnectionIds: liveSecondaryConnectionIds() })
-        )
-        // The status-stack poll guard latches session ids the OLD runtime
-        // reported gone (4001). A respawned backend re-mints runtimes, so
-        // those ids may be live again after re-resume — clear the latch with
-        // the same lifetime as the runtime bindings it shadows.
-        resetBackgroundPollingGuard()
-
-        // Same staleness, other half: pre-reconnect busy flags are keyed by
-        // those dead runtime ids and would never receive their terminal
-        // busy:false — clear them or the sidebar running arc lies forever
-        // (#53902/#73082). A genuinely live turn re-asserts busy on its next
-        // post-reconnect event.
         // A manual retry may finish after the user has moved to another route.
         if (!manual || (isActivePrimary() && gatewayActivationEpoch() === manual.activationEpoch)) {
-          reconcileBusyStatesOnReconnect()
+          if (manual) {
+            reconcileBusyStatesOnReconnect()
+          }
+
           await callbacksRef.current.refreshHermesConfig().catch(() => undefined)
           await callbacksRef.current.refreshSessions().catch(() => undefined)
         }
@@ -693,6 +676,7 @@ export function useGatewayBoot({
           notifyPrimaryReauth(primaryReauthError, () => primaryReauthError ?? '')
         }
       } finally {
+        reconnectProfile = undefined
         reconnecting = false
 
         if (!cancelled && !primaryReauthError && !gatewayOpen() && !$gatewaySwitching.get()) {
@@ -773,7 +757,7 @@ export function useGatewayBoot({
       // timeout — prompt.submit's is 30 minutes, which reads as "enter does
       // nothing until I restart the app". Probe liveness with a short-bounded
       // ping; on failure force the socket down so the onState handler above
-      // schedules a reconnect (and resetTileRuntimeBindings re-resumes tiles),
+      // schedules a reconnect (and invalidates old tile attachments),
       // instead of letting the user's next submit hang against a dead socket.
       //
       // A TIMEOUT is not always proof of death, though (#95327): a backend
@@ -1303,6 +1287,24 @@ export function useGatewayBoot({
     const offActiveStateReauth = $gatewayState.listen(syncPrimaryReauthError)
 
     const offState = gateway.onState(st => {
+      if (st === 'open' && bootCompleted && !$gatewaySwitching.get() && primaryConnection) {
+        // Both the boot timer and an on-demand request can reopen this socket.
+        // Invalidate only its attachments, before effects can resume on open.
+        const connectionId = primaryRuntimeConnectionId(primaryConnection)
+        resetTileRuntimeBindings(
+          reconnectProfile && connectionId
+            ? { connectionId, profile: reconnectProfile }
+            : (connectionId ?? { liveConnectionIds: liveSecondaryConnectionIds() })
+        )
+        resetBackgroundPollingGuard()
+
+        // Manual retries retire foreground latches only if they still own the
+        // active route when their dial finishes (see attemptReconnect).
+        if (!reconnectProfile) {
+          reconcileBusyStatesOnReconnect()
+        }
+      }
+
       // Mirror to the composer only while the primary is the active profile —
       // a background secondary reconnect mustn't flip the foreground state.
       reportPrimaryGatewayState(st)

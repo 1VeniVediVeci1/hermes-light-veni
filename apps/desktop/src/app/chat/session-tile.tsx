@@ -9,9 +9,9 @@
  *
  * Lifecycle: `openSessionTile(storedId)` -> `watchSessionTiles` registers a
  * pane contribution docked right of the main zone -> tree adoption lands it
- * -> the pane mounts and asks the delegate for a live runtime id. Closing
- * the pane (tab Close) removes the tile + its zone; tiles persist across
- * restarts and re-resume on boot.
+ * -> the visible pane asks the delegate for a live runtime id. Closing
+ * the pane (tab Close) removes the tile + its zone; idle background tiles
+ * persist across restarts without attaching until shown.
  */
 
 import { useStore } from '@nanostores/react'
@@ -27,6 +27,7 @@ import { ModelMenuPanel } from '@/app/shell/model-menu-panel'
 import { ReasoningMenuPanel } from '@/app/shell/reasoning-menu-panel'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { CenteredThreadSpinner } from '@/components/assistant-ui/thread/status'
+import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { findGroupOfPane } from '@/components/pane-shell/tree/model'
 import type { TabActionsMenu, TabActionsMenuProps } from '@/components/pane-shell/tree/renderer/track-model'
 import { $layoutTree, closeTreePane, moveTreePane, setTreeGroupTabStrip } from '@/components/pane-shell/tree/store'
@@ -60,7 +61,6 @@ import {
   sessionPinId
 } from '@/store/session'
 import { sessionNeedsInput } from '@/store/session-card-wait'
-import { isSessionRemovalPending } from '@/store/session-removal'
 import { requestForSessionProfile } from '@/store/session-request-router'
 import {
   $botChatScopes,
@@ -84,6 +84,7 @@ import { startSessionDrag } from './session-drag'
 import { SessionStatusDot } from './session-status-dot'
 import { useSessionTileActions } from './session-tile-actions'
 import { tileOwnerRoute } from './session-tile-owner'
+import { queueTileRestore, tileBackendIdentityChanged, unbindTilesForBackendIdentityChange, WRONG_BACKEND_TILE_ERROR } from './session-tile-restore'
 import { reasoningEffortPending, type SessionView, SessionViewProvider } from './session-view'
 import { SessionActionsMenu, SessionContextMenu } from './sidebar/session-actions-menu'
 import { lastVisibleMessageIsUser } from './thread-loading'
@@ -91,102 +92,6 @@ import { lastVisibleMessageIsUser } from './thread-loading'
 import { ChatView } from '.'
 
 const NO_MESSAGES: ChatMessage[] = []
-
-export const WRONG_BACKEND_TILE_ERROR =
-  'Wrong backend — this session lives on another connection. Reconnect to that backend to open it.'
-
-export function sessionTileResumeFailure(
-  message: string,
-  durableSessionFound: boolean | undefined,
-  tileStillUnbound: boolean,
-  backendIdentityChanged = false
-): string | undefined {
-  if (!tileStillUnbound) {
-    return undefined
-  }
-
-  if (!/session not found|\b404\b/i.test(message)) {
-    return message
-  }
-
-  if (backendIdentityChanged) {
-    return WRONG_BACKEND_TILE_ERROR
-  }
-
-  if (durableSessionFound) {
-    return 'Session is still available — retry resuming it.'
-  }
-
-  return 'Session unavailable — you can retry resuming it.'
-}
-
-/** True when a persisted tile's owner is a different backend than the one that
- *  just became active. An unqualified local boot (no connectionId, mode local)
- *  counts as the local identity — that is the post-update empty backend. */
-export function tileBackendIdentityChanged(
-  ownerConnectionId: string | null | undefined,
-  activeConnection: { connectionId?: string | null; mode?: string | null } | null | undefined
-): boolean {
-  const owner = String(ownerConnectionId || '').trim()
-
-  if (!owner || !activeConnection) {
-    return false
-  }
-
-  const active =
-    String(activeConnection.connectionId || '').trim() || (activeConnection.mode === 'local' ? 'local' : '')
-
-  return Boolean(active) && owner !== active
-}
-
-export function unbindTilesForBackendIdentityChange<
-  T extends { error?: string; ownerRoute?: { connectionId?: string }; runtimeId?: string }
->(
-  tiles: readonly T[],
-  activeConnection: { connectionId?: string | null; mode?: string | null } | null | undefined
-): T[] {
-  let changed = false
-
-  const next = tiles.map(tile => {
-    if (!tileBackendIdentityChanged(tile.ownerRoute?.connectionId, activeConnection)) {
-      return tile
-    }
-
-    if (!tile.runtimeId && tile.error === WRONG_BACKEND_TILE_ERROR) {
-      return tile
-    }
-
-    changed = true
-    const unbound = { ...tile, error: WRONG_BACKEND_TILE_ERROR }
-    delete unbound.runtimeId
-
-    return unbound
-  })
-
-  return changed ? next : (tiles as T[])
-}
-
-/** Should this tile dispatch a `session.resume`?
- *
- *  - The gateway must be OPEN: persisted tiles mount at boot while it is still
- *    connecting, and an ungated resume rejected there latched every restored
- *    tile into the error card.
- *  - A bound runtime, a latched error, or an in-flight attempt means there is
- *    nothing to do.
- *  - A removal-pending session is skipped for the same reason the primary's
- *    `resumeSession` skips it: a 4001 racing a delete unbinds this tile's
- *    runtime and re-arms the effect against an id that is already gone. The
- *    resume would 404 and latch an error card for a chat the user deleted;
- *    `closeSessionTile` lands moments later. */
-export function shouldResumeSessionTile(opts: {
-  gatewayOpen: boolean
-  removalPending: boolean
-  resuming: boolean
-  runtimeId: null | string | undefined
-  tileError: string | undefined
-}): boolean {
-  return !opts.removalPending && opts.gatewayOpen && !opts.runtimeId && !opts.tileError && !opts.resuming
-}
 
 /** The tile's SessionView: the same atom shape the primary chat renders
  *  from, computed from this session's slice of `$sessionStates`. */
@@ -464,7 +369,8 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
   const runtimeId = tile?.runtimeId ?? null
   const gatewayOpen = useStore($gatewayState) === 'open'
   const delegateRevision = useStore($sessionTileDelegateRevision)
-  const resumingRef = useRef(false)
+  const visible = usePaneVisible()
+  const pendingResume = tile?.pendingResume
   const view = useMemo(() => buildTileView(storedSessionId), [storedSessionId])
 
   const storedSessionStillExists = useCallback(
@@ -519,65 +425,16 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
     }
   }, [hasMessages, ownerRoute, runtimeId, storedSessionId, storedSessionStillExists])
 
-  // Gating lives in shouldResumeSessionTile (unit-tested there).
-  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
-    if (
-      !shouldResumeSessionTile({
-        gatewayOpen,
-        removalPending: isSessionRemovalPending(storedSessionId),
-        resuming: resumingRef.current,
-        runtimeId,
-        tileError: tile?.error
-      })
-    ) {
+    if (!visible || !gatewayOpen || !tile || (runtimeId && !pendingResume) || tile.error) {
       return
     }
 
-    const delegate = sessionTileDelegate()
+    let wanted = true
+    void queueTileRestore(storedSessionId, 'visible', () => wanted)
 
-    if (!delegate) {
-      return
-    }
-
-    resumingRef.current = true
-
-    delegate
-      .resumeTile(storedSessionId)
-      .then(id => patchSessionTile(storedSessionId, { error: undefined, runtimeId: id }))
-      .catch(async (err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err)
-
-        if (!/session not found|\b404\b/i.test(message)) {
-          patchSessionTile(storedSessionId, { error: message })
-
-          return
-        }
-
-        // A recents page is not authoritative, and resolveStoredSession()
-        // intentionally treats transient probe failures like a miss. Await it
-        // before releasing this resume attempt, then fail safe: a tile may be
-        // retried by the user, but must never be deleted on an inconclusive
-        // reconnect-time lookup.
-        const durableSession = await resolveStoredSession(storedSessionId, ownerRoute).catch(() => undefined)
-        const current = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
-        const identityChanged = tileBackendIdentityChanged(ownerRoute?.connectionId, $connection.get())
-
-        const error = sessionTileResumeFailure(
-          message,
-          Boolean(durableSession),
-          Boolean(current && !current.runtimeId),
-          identityChanged
-        )
-
-        if (error) {
-          patchSessionTile(storedSessionId, { error })
-        }
-      })
-      .finally(() => {
-        resumingRef.current = false
-      })
-  }, [delegateRevision, gatewayOpen, ownerRoute, runtimeId, storedSessionId, tile?.error])
+    return () => { wanted = false }
+  }, [delegateRevision, gatewayOpen, pendingResume, runtimeId, storedSessionId, tile, visible])
 
   // The gateway (re)opening invalidates any latched error — it likely came
   // from a not-yet-open gateway or the previous connection. Clearing it

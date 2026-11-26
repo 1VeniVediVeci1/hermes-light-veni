@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
+import { RESTORE_SNAPSHOT } from '@/api/session-restore-snapshot'
 import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import {
   extendRefreshPageToOverlap,
@@ -1494,7 +1495,8 @@ export function useSessionActions({
               activated = await requestForSession<SessionResumeResult>('session.activate', {
                 session_id: cachedRuntimeId,
                 cols: 96,
-                omit_messages: true
+                omit_messages: true,
+                [RESTORE_SNAPSHOT]: true
               })
             } catch (error) {
               // Compatibility for older backends. Modern backends require
@@ -2001,7 +2003,10 @@ export function useSessionActions({
           () =>
             requestForSession<SessionResumeResult>(
               'session.resume',
-              primaryResumeParams(storedSessionId, watchWindow, options?.authoritativeSnapshot, sessionProfile)
+              {
+                ...primaryResumeParams(storedSessionId, watchWindow, options?.authoritativeSnapshot, sessionProfile),
+                ...(!watchWindow && !options?.authoritativeSnapshot ? { [RESTORE_SNAPSHOT]: true } : {})
+              }
             ),
           { requiresMessages: options?.authoritativeSnapshot, scope: sessionOwner }
         ).then(resumed => {

@@ -1,5 +1,5 @@
 import type { GatewayEvent } from '@hermes/shared'
-import { act, cleanup, waitFor } from '@testing-library/react'
+import { act, cleanup } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
@@ -85,7 +85,7 @@ describe('session.replay_gap recovery', () => {
     expect(takeSessionDraft('stored-active').text).toBe('keep typing')
   })
 
-  it('re-resumes the affected mounted tile for a gateway snapshot while retaining its owner and draft', async () => {
+  it('defers an off-screen tile gap without losing the authoritative snapshot requirement, owner or draft', () => {
     const ownerRoute = {
       connectionId: 'remote-b',
       mode: 'remote' as const,
@@ -113,9 +113,8 @@ describe('session.replay_gap recovery', () => {
 
     act(() => stream.handleEvent(replayGap('runtime-tile', ownerRoute)))
 
-    await waitFor(() =>
-      expect(resumeTile).toHaveBeenCalledWith('stored-tile', { authoritativeSnapshot: true })
-    )
+    expect(resumeTile).not.toHaveBeenCalled()
+    expect($sessionTiles.get()[0]?.pendingResume).toEqual({ snapshot: true })
     expect($sessionTiles.get()[0]?.ownerRoute).toEqual(ownerRoute)
     expect(takeSessionDraft('stored-tile').text).toBe('unsent tile draft')
     expect(sessionTileDelegate()).toBe(delegate)

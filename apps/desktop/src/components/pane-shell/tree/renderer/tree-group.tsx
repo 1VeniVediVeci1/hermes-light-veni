@@ -49,7 +49,7 @@ import { closeAllOpenSessionTiles, setZoneParkedTiles } from '@/store/session-st
 import { $layoutEditMode, $layoutEditRevealsHidden } from '../../edit-mode'
 import { useWindowControlsOverlap } from '../../geometry'
 import { emptyPaneLifecycleState, reconcilePaneLifecycle } from '../../pane-lifecycle'
-import { hiddenPaneProps, PaneGroupContext, PaneLifecycleContext, PaneVisibleContext } from '../../pane-visibility'
+import { hiddenPaneProps, PaneGroupContext, PaneLifecycleContext, PaneVisibleContext, usePaneVisible } from '../../pane-visibility'
 import {
   $workspaceMode,
   $workspaceOwnerKey,
@@ -409,6 +409,7 @@ export function TreeGroup({
   // The scrolling tab list inside the header (the strip also holds the
   // minimize chevron, which must not scroll away).
   const tabsRef = useRef<HTMLDivElement>(null)
+  const parentVisible = usePaneVisible()
   const measuredBelowControls = usePanelTitlebar(ref, topEdge, Boolean(node.minimized))
   // The chip under the last right-click — the pane the zone menu's Split
   // actions carry into the new zone (header background = the active pane).
@@ -1015,7 +1016,7 @@ export function TreeGroup({
                       <PaneLifecycleContext.Provider
                         value={node.minimized ? 'hot-hidden' : (paneLifecycle[paneId]?.lifecycle ?? 'visible')}
                       >
-                        <PaneVisibleContext.Provider value={isActive}>
+                        <PaneVisibleContext.Provider value={isActive && parentVisible}>
                           <ContribBoundary id={pane.id} key={paneEpochs[paneId] ?? 0}>
                             <ContribRender render={pane.render} />
                           </ContribBoundary>

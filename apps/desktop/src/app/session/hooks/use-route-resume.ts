@@ -5,6 +5,8 @@ import { type SessionResumeRequest, setResumeExhaustedSessionId } from '@/store/
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import { markSelectionRestore } from '@/store/session-states'
 
+import { withRoutedSessionRestore } from '../session-restore-queue'
+
 import { useResumeReattach } from './use-resume-reattach'
 import { MAX_RESUME_RETRIES, type ResumeAttemptOptions, resumeRetryDelayMs } from './use-session-actions/resume-latches'
 
@@ -55,16 +57,14 @@ function dispatchRouteResume(
   routedSessionId: string,
   sessionResumeRequest: SessionResumeRequest | null,
   explicitlyRequested: boolean
-): void {
+): Promise<unknown> {
   const ownerRoute = sessionResumeRequest?.sessionId === routedSessionId ? sessionResumeRequest.ownerRoute : undefined
 
   if (explicitlyRequested && sessionResumeRequest?.authoritativeSnapshot) {
-    void resumeSession(routedSessionId, true, ownerRoute, { authoritativeSnapshot: true })
-  } else if (ownerRoute) {
-    void resumeSession(routedSessionId, true, ownerRoute)
-  } else {
-    void resumeSession(routedSessionId, true)
+    return resumeSession(routedSessionId, true, ownerRoute, { authoritativeSnapshot: true })
   }
+
+  return ownerRoute ? resumeSession(routedSessionId, true, ownerRoute) : resumeSession(routedSessionId, true)
 }
 
 // HashRouter boot edge case: pathname briefly reads `/` before the hash is
@@ -218,7 +218,9 @@ export function useRouteResume({
 
         bootResumeRef.current = false
 
-        dispatchRouteResume(resumeSession, routedSessionId, sessionResumeRequest, explicitlyRequested)
+        void withRoutedSessionRestore(() =>
+          dispatchRouteResume(resumeSession, routedSessionId, sessionResumeRequest, explicitlyRequested)
+        )
       }
 
       return

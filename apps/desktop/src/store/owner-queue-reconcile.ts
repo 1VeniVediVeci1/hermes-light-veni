@@ -1,8 +1,10 @@
 import { computed } from 'nanostores'
 
+import { RESTORE_SNAPSHOT } from '@/api/session-restore-snapshot'
+import { routeSessionId } from '@/app/routes'
 import { singleFlightSessionResume } from '@/app/session/hooks/use-prompt-actions/single-flight-resume'
 import { primaryResumeParams } from '@/app/session/hooks/use-session-actions/resume-owner'
-import { mapPool } from '@/lib/pool'
+import { queueSessionRestore } from '@/app/session/session-restore-queue'
 import { stableArray } from '@/lib/stable-array'
 import type { SessionResumeResult } from '@/types/hermes'
 
@@ -31,9 +33,6 @@ export function sessionsWithOwnerWork(): string[] {
   return [...keys]
 }
 
-// Reads in flight at once: an open edge after a restart can find many chats with owner work.
-const RECONCILE_CONCURRENCY = 4
-
 async function reconcileOne(request: GatewayRequest, key: string): Promise<void> {
   const owner = knownOwnerForSession(key)
   const profile = owner ? (typeof owner === 'string' ? owner : owner.profile) : undefined
@@ -45,7 +44,7 @@ async function reconcileOne(request: GatewayRequest, key: string): Promise<void>
         key,
         request,
         'session.resume',
-        primaryResumeParams(key, false, undefined, profile)
+        { ...primaryResumeParams(key, false, undefined, profile), [RESTORE_SNAPSHOT]: true }
       ),
     { scope: owner }
   ).catch(() => null)
@@ -79,44 +78,46 @@ function ownerRouteIsLocal(key: string): boolean {
  * and never ran. Every open edge re-reads: a snapshot from an earlier connection says nothing about
  * what the restarted owner holds.
  *
- * The read is the open path's own `session.resume`. It is a full attach, not a lightweight read: the
- * canonical gateway ignores `omit_messages`, so the reply carries the whole stored transcript and
- * the window stays subscribed to that chat (as after opening it). Only chats whose owner admits
- * canonically on a provably local route are read: that owner answers with `pending_submissions` and
- * never auto-continues an interrupted turn on resume, where a legacy backend's cold resume would
- * start a billed model turn in a chat the user never opened.
+ * This is a real attachment, not an events.since read: the latter cannot tell us which queued
+ * admissions survived a restart. Only do it for proven local canonical owners with pending work,
+ * behind visible restores. Legacy resume can auto-continue an interrupted turn.
  */
-export async function reconcileOwnerQueues(request: GatewayRequest): Promise<void> {
-  // Queue keys are lineage roots; the selection is the stored tip, which differs after compression.
-  const sessions = $sessions.get()
-  const selected = resolveComposerSessionKey($selectedStoredSessionId.get(), sessions)
+async function reconcileOwnerQueues(request: GatewayRequest, stillOpen: () => boolean): Promise<void> {
+  await Promise.all(sessionsWithOwnerWork().map(key => queueSessionRestore('background', async () => {
+    // The URL knows its session before the primary hook has selected it.
+    // Recheck at dispatch: the user may also have switched while queued.
+    const sessions = $sessions.get()
+    const selected = routeSessionId(window.location.hash.slice(1)) ?? $selectedStoredSessionId.get()
 
-  const queue = sessionsWithOwnerWork().filter(
-    key =>
-      resolveComposerSessionKey(key, sessions) !== selected && serverOwnsComposerQueue(key) && ownerRouteIsLocal(key)
-  )
-
-  await mapPool(queue, RECONCILE_CONCURRENCY, key => reconcileOne(request, key))
+    if (
+      stillOpen() && resolveComposerSessionKey(key, sessions) !== resolveComposerSessionKey(selected, sessions) &&
+      serverOwnsComposerQueue(key) && ownerRouteIsLocal(key)
+    ) {
+      await reconcileOne(request, key)
+    }
+  })))
 }
 
-// One read per edge into an open gateway (first boot, relaunch, owner restart), taken once the
-// session list can route it.
-let readForThisOpen = false
-
-/** Keep the owner queues of chats not on screen current across gateway opens; returns the stop. */
+/** Reconcile off-screen owner work once per gateway open, after the list can route it. */
 export function watchOwnerQueues(request: GatewayRequest): () => void {
+  let currentOpen: object | undefined
+
   const check = () => {
     if ($gatewayState.get() !== 'open') {
-      readForThisOpen = false
-    } else if (!readForThisOpen && $sessions.get().length > 0) {
-      readForThisOpen = true
-      void reconcileOwnerQueues(request)
+      currentOpen = undefined
+    } else if (!currentOpen && $sessions.get().length > 0) {
+      const open = {}
+      currentOpen = open
+      void reconcileOwnerQueues(request, () => currentOpen === open)
     }
   }
 
   const stops = [$gatewayState.subscribe(check), $sessions.listen(check)]
 
-  return () => stops.forEach(stop => stop())
+  return () => {
+    currentOpen = undefined
+    stops.forEach(stop => stop())
+  }
 }
 
 let pausedIds: readonly string[] = []
