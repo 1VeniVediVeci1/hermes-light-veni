@@ -509,16 +509,15 @@ export class HermesGateway extends JsonRpcGatewayClient {
       this.restoreSnapshots.forget(id)
     }
 
+    const mark = this.restoreSnapshots.mark()
+
     try {
       const result = await send()
 
       if (id && reuse && generation === this.connectionGeneration && this.connectionState === 'open') {
-        this.restoreSnapshots.record(profile, id, result)
-
-        if (result && typeof result === 'object' && 'session_id' in result && typeof result.session_id === 'string') {
-          const runtimeProfile = this.canonical ? this.resolveSessionProfile(result.session_id, profile) : profile
-          this.restoreSnapshots.record(runtimeProfile, result.session_id, result)
-        }
+        const runtimeId = (result as { session_id?: unknown } | null)?.session_id
+        const runtimeProfile = this.canonical && typeof runtimeId === 'string' ? this.resolveSessionProfile(runtimeId, profile) : profile
+        this.restoreSnapshots.record(mark, profile, id, result, runtimeProfile)
       }
 
       return result
@@ -672,12 +671,21 @@ export class HermesGateway extends JsonRpcGatewayClient {
       this.canonical = event.payload?.session_authority === true
     }))
     super.onState(state => this.readiness.trackTransport(state))
-    this.onEvent(event => {
-      if (event.type === 'session.reclaimed' || event.type === 'session.replay_gap' ||
-        event.type === 'message.start' || event.type === 'message.complete') {
-        const id = event.session_id ?? (event.payload as { session_id?: string } | undefined)?.session_id
+    // Legacy prompts are server requests, not events. Seen first, then left to the real handlers.
+    super.onRequest(request => {
+      if (typeof request.params?.session_id === 'string') { this.restoreSnapshots.forget(request.params.session_id) }
 
-        if (id) { this.restoreSnapshots.forget(id) }
+      return false
+    })
+    this.onEvent(event => {
+      // Any later frame for a session (a turn, prompt, todo or policy change) may change its restore
+      // answer; only that restore's own hydration start does not.
+      const payload = event.payload as { session_id?: unknown; status?: unknown } | undefined
+
+      if (event.type !== 'session.resume_progress' || payload?.status !== 'loading') {
+        for (const id of new Set([event.session_id, payload?.session_id])) {
+          if (typeof id === 'string' && id) { this.restoreSnapshots.forget(id) }
+        }
       }
 
       if (!this.canonical) { return }
